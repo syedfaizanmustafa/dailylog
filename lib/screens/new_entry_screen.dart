@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'dart:ui' as ui;
@@ -22,7 +23,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   final int rowCount = 15;
   static const double colWidth = 80;
   static const double paidColWidth = 80;
-  static const double signColWidth = 220;
+  static const double signColWidth = 300;
   int _currentSheetNumber = 1;
   final List<String> sectionHeaders = [
     'ALUMINIUM',
@@ -75,6 +76,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
 
   // Loading state for submission
   bool _isSubmitting = false;
+
+  // Selected date for the entry
+  DateTime _selectedDate = DateTime.now();
 
   // Map to cache loaded signature images
   final Map<String, Uint8List> _loadedSignatures = {};
@@ -319,19 +323,20 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       await context.push(
         '/customer',
         extra: {
-          'onSignatureComplete': (Uint8List signatureBytes) {
+          'onSignatureComplete': (Uint8List signatureBytes, String customerName) {
             setState(() {
               _currentSignatures['$row-$col'] = signatureBytes;
-              _currentGridData[row][col] = 'Signed';
+              _currentGridData[row][col] = '$customerName/Signed';
             });
             // Calculate totals after updating the cell
             _calculateAndUpdateTotals();
           },
-          'onSignaturePointsComplete': (List<Point> signaturePoints) {
+          'onSignaturePointsComplete': (List<Point> signaturePoints, String customerName) {
             setState(() {
               _sheetsSignaturePoints[_currentSheetNumber] ??= {};
               _sheetsSignaturePoints[_currentSheetNumber]!['$row-$col'] =
                   signaturePoints;
+              _currentGridData[row][col] = '$customerName/Signed';
               print(
                 'Saved ${signaturePoints.length} signature points for cell $row-$col',
               );
@@ -552,22 +557,111 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     );
   }
 
+  // Method to show Cupertino date picker
+  Future<void> _showDatePicker() async {
+    final DateTime? picked = await showCupertinoModalPopup<DateTime>(
+      context: context,
+      builder: (BuildContext context) {
+        return Container(
+          height: 400,
+          color: Colors.white,
+          child: Column(
+            children: [
+              Container(
+                height: 60,
+                color: Colors.grey[200],
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    CupertinoButton(
+                      child: Text('Cancel'),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                    CupertinoButton(
+                      child: Text('Done'),
+                      onPressed: () => Navigator.pop(context, _selectedDate),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: CupertinoDatePicker(
+                  mode: CupertinoDatePickerMode.date,
+                  initialDateTime: _selectedDate,
+                  onDateTimeChanged: (DateTime newDate) {
+                    setState(() {
+                      _selectedDate = newDate;
+                    });
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (picked != null) {
+      setState(() {
+        _selectedDate = picked;
+      });
+    }
+  }
+
   Widget _buildSignatureCell(int row, int col) {
     final signatureKey = '$row-$col';
+    final cellData = _currentGridData[row][col];
 
     // Check if we have local signature points (for current session)
     final signaturePoints =
         _sheetsSignaturePoints[_currentSheetNumber]?[signatureKey];
 
-    if (signaturePoints != null && signaturePoints.isNotEmpty) {
-      return CustomPaint(
-        size: Size.infinite,
-        painter: SignaturePointsPainter(signaturePoints),
+    // Check if cell contains name/signature data
+    if (cellData.contains('/') && cellData.contains('Signed')) {
+      final parts = cellData.split('/');
+      final customerName = parts[0];
+      
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          // Customer name
+          Expanded(
+            flex: 2,
+            child: Text(
+              customerName,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.blue[700],
+              ),
+              textAlign: TextAlign.center,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+          // Signature indicator
+          Expanded(
+            flex: 3,
+            child: signaturePoints != null && signaturePoints.isNotEmpty
+                ? CustomPaint(
+                    size: Size.infinite,
+                    painter: SignaturePointsPainter(signaturePoints),
+                  )
+                : Text(
+                    'Signed',
+                    style: TextStyle(
+                      fontSize: 8,
+                      color: Colors.green[700],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+          ),
+        ],
       );
     }
 
     // Fallback to text for empty cells
-    return Text(_currentGridData[row][col], overflow: TextOverflow.ellipsis);
+    return Text(cellData, overflow: TextOverflow.ellipsis);
   }
 
   // Future method to build signature cell with URL support
@@ -616,7 +710,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
 
   Widget _buildStaticDetails() {
     final double gridWidth = 4 * (colWidth * 4 + paidColWidth) + signColWidth;
-    final String today = DateFormat('MM/dd/yyyy').format(DateTime.now());
+    final String formattedDate = DateFormat('MM/dd/yyyy').format(_selectedDate);
     return SizedBox(
       width: gridWidth,
       child: Padding(
@@ -786,12 +880,15 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                       SizedBox(width: 4),
                       Expanded(
                         flex: 2,
-                        child: Container(
+                        child: GestureDetector(
+                          onTap: _showDatePicker,
                           child: Text(
-                            today,
+                            formattedDate,
                             style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w500,
+                              color: Colors.blue,
+                              decoration: TextDecoration.underline,
                             ),
                           ),
                         ),
@@ -1533,6 +1630,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       'userId': userId,
       'email': email,
       'createdAt': DateTime.now().toIso8601String(),
+      'entryDate': _selectedDate.toIso8601String(),
       'sheets': {},
     };
 
@@ -1578,6 +1676,23 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
           'Found ${signaturePoints.length} signature points for sheet $sheetNumber',
         );
 
+        // Extract customer names from grid data
+        final customerNames = <String, String>{};
+        signaturePoints.forEach((key, points) {
+          final rowCol = key.split('-');
+          if (rowCol.length == 2) {
+            final row = int.tryParse(rowCol[0]);
+            final col = int.tryParse(rowCol[1]);
+            if (row != null && col != null && row < sanitizedGridData.length && col < sanitizedGridData[row].length) {
+              final cellData = sanitizedGridData[row][col];
+              if (cellData.contains('/') && cellData.contains('Signed')) {
+                final parts = cellData.split('/');
+                customerNames[key] = parts[0]; // Store the customer name
+              }
+            }
+          }
+        });
+
         // Convert to safe format
         final safeGridData = _convertGridDataToSafeFormat(sanitizedGridData);
 
@@ -1585,6 +1700,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
           'data': safeGridData,
           'hasSignatures': signaturePoints.isNotEmpty,
           'signatureCount': signaturePoints.length,
+          'customerNames': customerNames, // Add customer names to sheet data
         };
 
         _logSubmissionProgress('Processed sheet $sheetNumber');
@@ -1680,6 +1796,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       'userId': userId,
       'email': email,
       'createdAt': DateTime.now().toIso8601String(),
+      'entryDate': _selectedDate.toIso8601String(),
       'sheets': {
         '1': {
           'data': {
@@ -1922,6 +2039,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
 
       // Convert points to serializable format
       final serializedPoints = <String, List<Map<String, dynamic>>>{};
+      final customerNames = <String, String>{}; // Store customer names
 
       signaturePoints.forEach((key, points) {
         serializedPoints[key] =
@@ -1933,14 +2051,29 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                 'type': point.type.index, // 0 for move, 1 for draw
               };
             }).toList();
+        
+        // Extract customer name from grid data if available
+        final rowCol = key.split('-');
+        if (rowCol.length == 2) {
+          final row = int.tryParse(rowCol[0]);
+          final col = int.tryParse(rowCol[1]);
+          if (row != null && col != null && row < _currentGridData.length && col < _currentGridData[row].length) {
+            final cellData = _currentGridData[row][col];
+            if (cellData.contains('/') && cellData.contains('Signed')) {
+              final parts = cellData.split('/');
+              customerNames[key] = parts[0]; // Store the customer name
+            }
+          }
+        }
       });
 
       await subcollectionRef.set({
         'points': serializedPoints,
+        'customerNames': customerNames, // Add customer names to storage
         'createdAt': DateTime.now().toIso8601String(),
       });
 
-      print('Signature points saved successfully');
+      print('Signature points and customer names saved successfully');
     } catch (e) {
       print('Error saving signature points: $e');
       throw e;
@@ -1996,11 +2129,13 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
             // Main scrollable content area
             Expanded(
               child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                controller: _horizontalController,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [_buildStaticDetails(), _buildGrid()],
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  controller: _horizontalController,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [_buildStaticDetails(), _buildGrid()],
+                  ),
                 ),
               ),
             ),

@@ -12,9 +12,10 @@ class CustomerScreen extends StatefulWidget {
 
 class _CustomerScreenState extends State<CustomerScreen> {
   final _amountController = TextEditingController();
+  final _nameController = TextEditingController();
   late final SignatureController _signatureController;
-  Function(Uint8List)? _onSignatureComplete;
-  Function(List<Point>)? _onSignaturePointsComplete;
+  Function(Uint8List, String)? _onSignatureComplete;
+  Function(List<Point>, String)? _onSignaturePointsComplete;
 
   @override
   void initState() {
@@ -35,7 +36,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
         print('Extra data keys: ${extra.keys}');
         if (extra.containsKey('onSignatureComplete')) {
           _onSignatureComplete =
-              extra['onSignatureComplete'] as Function(Uint8List)?;
+              extra['onSignatureComplete'] as Function(Uint8List, String)?;
           print('Image callback extracted successfully');
         } else {
           print('No onSignatureComplete key found in extra data');
@@ -43,7 +44,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
 
         if (extra.containsKey('onSignaturePointsComplete')) {
           _onSignaturePointsComplete =
-              extra['onSignaturePointsComplete'] as Function(List<Point>)?;
+              extra['onSignaturePointsComplete'] as Function(List<Point>, String)?;
           print('Points callback extracted successfully');
         } else {
           print('No onSignaturePointsComplete key found in extra data');
@@ -57,6 +58,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
   @override
   void dispose() {
     _amountController.dispose();
+    _nameController.dispose();
     _signatureController.dispose();
     super.dispose();
   }
@@ -85,6 +87,25 @@ class _CustomerScreenState extends State<CustomerScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Text(
+              'Customer Name',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _nameController,
+              decoration: InputDecoration(
+                hintText: 'Enter customer name',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              ),
+              textCapitalization: TextCapitalization.words,
+            ),
+            const SizedBox(height: 24),
             Text(
               'Signature',
               style: Theme.of(
@@ -132,6 +153,19 @@ class _CustomerScreenState extends State<CustomerScreen> {
           onPressed: () async {
             print('Submit button pressed');
 
+            // Validate name
+            final customerName = _nameController.text.trim();
+            if (customerName.isEmpty) {
+              print('Name is empty, showing error');
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Please enter customer name before submitting'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+              return;
+            }
+
             if (!_signatureController.isNotEmpty) {
               print('Signature is empty, showing error');
               ScaffoldMessenger.of(context).showSnackBar(
@@ -176,13 +210,13 @@ class _CustomerScreenState extends State<CustomerScreen> {
 
             if (_onSignaturePointsComplete != null) {
               print('Calling onSignaturePointsComplete callback');
-              _onSignaturePointsComplete!(points);
+              _onSignaturePointsComplete!(points, customerName);
               success = true;
             }
 
             if (_onSignatureComplete != null) {
               print('Calling onSignatureComplete callback');
-              _onSignatureComplete!(signatureBytes);
+              _onSignatureComplete!(signatureBytes, customerName);
               success = true;
             }
 

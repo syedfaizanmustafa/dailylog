@@ -31,7 +31,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   final int rowCount = 15;
   static const double colWidth = 80;
   static const double paidColWidth = 80;
-  static const double signColWidth = 220;
+  static const double signColWidth = 300;
   int _currentSheetNumber = 1;
   final List<String> sectionHeaders = [
     'ALUMINIUM',
@@ -54,6 +54,8 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
 
   // Map to store signature points for each sheet
   final Map<int, Map<String, List<SignaturePoint>>> _sheetsSignaturePoints = {};
+  // Map to store customer names for each sheet
+  final Map<int, Map<String, String>> _sheetsCustomerNames = {};
 
   // Entry data
   Map<String, dynamic>? _entryData;
@@ -161,6 +163,20 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
             }
 
             _sheetsSignaturePoints[sheetNumber] = pointsMap;
+            
+            // Load customer names if available
+            final customerNamesData = pointsData['customerNames'] as Map<String, dynamic>?;
+            if (customerNamesData != null) {
+              final customerNamesMap = <String, String>{};
+              customerNamesData.forEach((key, value) {
+                customerNamesMap[key] = value.toString();
+              });
+              _sheetsCustomerNames[sheetNumber] = customerNamesMap;
+              print(
+                'ViewEntryScreen: Loaded ${customerNamesMap.length} customer names for sheet $sheetNumber',
+              );
+            }
+            
             print(
               'ViewEntryScreen: Loaded ${pointsMap.length} signatures for sheet $sheetNumber',
             );
@@ -923,12 +939,46 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     final signatureKey = '$row-$col';
     final signaturePoints =
         _sheetsSignaturePoints[_currentSheetNumber]?[signatureKey];
+    final customerName = _sheetsCustomerNames[_currentSheetNumber]?[signatureKey];
 
     if (signaturePoints != null && signaturePoints.isNotEmpty) {
-      return CustomPaint(
-        painter: SignaturePointsPainter(signaturePoints),
-        size: const Size(double.infinity, double.infinity),
-      );
+      // If we have a customer name, show both name and signature
+      if (customerName != null && customerName.isNotEmpty) {
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            // Customer name
+            Expanded(
+              flex: 2,
+              child: Text(
+                customerName,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue[700],
+                ),
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
+            // Signature
+            Expanded(
+              flex: 3,
+              child: CustomPaint(
+                painter: SignaturePointsPainter(signaturePoints),
+                size: const Size(double.infinity, double.infinity),
+              ),
+            ),
+          ],
+        );
+      } else {
+        // Just show signature without name
+        return CustomPaint(
+          painter: SignaturePointsPainter(signaturePoints),
+          size: const Size(double.infinity, double.infinity),
+        );
+      }
     }
 
     // No signature, show empty cell or edit icon if in edit mode
@@ -957,6 +1007,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
 
       // Convert points to serializable format
       final serializedPoints = <String, List<Map<String, dynamic>>>{};
+      final customerNames = <String, String>{}; // Store customer names
 
       signaturePoints.forEach((key, points) {
         serializedPoints[key] =
@@ -968,14 +1019,21 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                 'type': point.type, // 0 for move, 1 for draw
               };
             }).toList();
+        
+        // Get customer name if available
+        final customerName = _sheetsCustomerNames[sheetNumber]?[key];
+        if (customerName != null && customerName.isNotEmpty) {
+          customerNames[key] = customerName;
+        }
       });
 
       await subcollectionRef.set({
         'points': serializedPoints,
+        'customerNames': customerNames, // Add customer names to storage
         'createdAt': DateTime.now().toIso8601String(),
       });
 
-      print('Signature points saved successfully');
+      print('Signature points and customer names saved successfully');
     } catch (e) {
       print('Error saving signature points: $e');
       throw e;
