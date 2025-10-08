@@ -46,25 +46,46 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
         final sheets = data['sheets'] as Map<String, dynamic>? ?? {};
         final sheetCount = sheets.length;
 
-        // Calculate total amount from sheets data
+        // Calculate total amount and section breakdowns from sheets data
         double totalAmount = 0.0;
+        double aluminiumTotal = 0.0;
+        double glassTotal = 0.0;
+        double petePlasticTotal = 0.0;
+        double otherCommoditiesTotal = 0.0;
+        
         for (final sheet in sheets.values) {
           final sheetData = sheet['data'] as Map<String, dynamic>?;
           if (sheetData != null) {
             final values = sheetData['values'] as List<dynamic>? ?? [];
-            // Sum up the paid amounts (columns 4, 9, 14, 19 - TOTAL PAID columns)
+            // Calculate section totals from TOTAL PAID columns
             for (int i = 0; i < values.length; i++) {
               final row = i ~/ 21;
               final col = i % 21;
-              if (col == 4 || col == 9 || col == 14 || col == 19) {
-                // TOTAL PAID columns
-                final value = values[i].toString();
-                if (value.isNotEmpty) {
-                  try {
-                    totalAmount += double.parse(value);
-                  } catch (e) {
-                    // Skip invalid numbers
+              final value = values[i].toString();
+              
+              if (value.isNotEmpty) {
+                try {
+                  final numValue = double.parse(value);
+                  
+                  if (col == 4) {
+                    // Aluminium Total Paid
+                    aluminiumTotal += numValue;
+                    totalAmount += numValue;
+                  } else if (col == 9) {
+                    // Glass Total Paid
+                    glassTotal += numValue;
+                    totalAmount += numValue;
+                  } else if (col == 14) {
+                    // Pete Plastic Total Paid
+                    petePlasticTotal += numValue;
+                    totalAmount += numValue;
+                  } else if (col == 19) {
+                    // Other Commodities Total Paid
+                    otherCommoditiesTotal += numValue;
+                    totalAmount += numValue;
                   }
+                } catch (e) {
+                  // Skip invalid numbers
                 }
               }
             }
@@ -81,6 +102,10 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
           'sheetCount': sheetCount,
           'amount': totalAmount,
           'email': data['email'] ?? '',
+          'aluminiumTotal': aluminiumTotal,
+          'glassTotal': glassTotal,
+          'petePlasticTotal': petePlasticTotal,
+          'otherCommoditiesTotal': otherCommoditiesTotal,
         });
       }
 
@@ -94,6 +119,30 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
         _isLoading = false;
       });
     }
+  }
+
+  Widget _buildSectionItem(String label, double amount, Color color) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Colors.grey[600],
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '\$${amount.toStringAsFixed(2)}',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            fontWeight: FontWeight.w600,
+            color: color,
+            fontSize: 12,
+          ),
+        ),
+      ],
+    );
   }
 
   @override
@@ -179,82 +228,150 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                               ),
                               child: Padding(
                                 padding: const EdgeInsets.all(16),
-                                child: Row(
+                                child: Column(
                                   children: [
-                                    Expanded(
-                                      flex: 2,
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            DateFormat(
-                                              'MM/dd/yyyy',
-                                            ).format(entry['date'] as DateTime),
+                                    // Header row with date, reference, sheets, email, and total
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          flex: 2,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                DateFormat(
+                                                  'MM/dd/yyyy',
+                                                ).format(entry['date'] as DateTime),
+                                                style: Theme.of(
+                                                  context,
+                                                ).textTheme.bodyMedium?.copyWith(
+                                                  color:
+                                                      Theme.of(
+                                                        context,
+                                                      ).colorScheme.primary,
+                                                  fontWeight: FontWeight.w500,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                '${entry['reference']}',
+                                                style: Theme.of(
+                                                  context,
+                                                ).textTheme.bodyMedium?.copyWith(
+                                                  color:
+                                                      Theme.of(
+                                                        context,
+                                                      ).colorScheme.secondary,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Expanded(
+                                          flex: 2,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                '${entry['sheetCount']} sheet${entry['sheetCount'] == 1 ? '' : 's'}',
+                                                style: Theme.of(
+                                                  context,
+                                                ).textTheme.bodyMedium?.copyWith(
+                                                  color:
+                                                      Theme.of(
+                                                        context,
+                                                      ).colorScheme.primary,
+                                                  fontWeight: FontWeight.w500,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                '${entry['email']}',
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .bodyMedium
+                                                    ?.copyWith(fontSize: 12),
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: Text(
+                                            '\$${(entry['amount'] as double?)?.toStringAsFixed(2) ?? '0.00'}',
                                             style: Theme.of(
                                               context,
                                             ).textTheme.bodyMedium?.copyWith(
-                                              color:
-                                                  Theme.of(
-                                                    context,
-                                                  ).colorScheme.primary,
-                                              fontWeight: FontWeight.w500,
+                                              fontWeight: FontWeight.w600,
                                             ),
+                                            textAlign: TextAlign.right,
                                           ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            '${entry['reference']}',
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodyMedium?.copyWith(
-                                              color:
-                                                  Theme.of(
-                                                    context,
-                                                  ).colorScheme.secondary,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
+                                        ),
+                                      ],
                                     ),
-                                    Expanded(
-                                      flex: 2,
+                                    const SizedBox(height: 12),
+                                    // Section breakdown row
+                                    Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey[50],
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: Colors.grey[200]!),
+                                      ),
                                       child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
+                                        crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
                                           Text(
-                                            '${entry['sheetCount']} sheet${entry['sheetCount'] == 1 ? '' : 's'}',
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodyMedium?.copyWith(
-                                              color:
-                                                  Theme.of(
-                                                    context,
-                                                  ).colorScheme.primary,
-                                              fontWeight: FontWeight.w500,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            '${entry['email']}',
+                                            'Total Paid Breakdown',
                                             style: Theme.of(context)
                                                 .textTheme
-                                                .bodyMedium
-                                                ?.copyWith(fontSize: 12),
-                                            overflow: TextOverflow.ellipsis,
+                                                .bodySmall
+                                                ?.copyWith(
+                                                  fontWeight: FontWeight.w600,
+                                                  color: Colors.grey[700],
+                                                ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: _buildSectionItem(
+                                                  'Aluminium',
+                                                  (entry['aluminiumTotal'] as double?) ?? 0.0,
+                                                  Colors.blue[600]!,
+                                                ),
+                                              ),
+                                              Expanded(
+                                                child: _buildSectionItem(
+                                                  'Glass',
+                                                  (entry['glassTotal'] as double?) ?? 0.0,
+                                                  Colors.green[600]!,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 8),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: _buildSectionItem(
+                                                  'Pete Plastic',
+                                                  (entry['petePlasticTotal'] as double?) ?? 0.0,
+                                                  Colors.orange[600]!,
+                                                ),
+                                              ),
+                                              Expanded(
+                                                child: _buildSectionItem(
+                                                  'Other Commodities',
+                                                  (entry['otherCommoditiesTotal'] as double?) ?? 0.0,
+                                                  Colors.purple[600]!,
+                                                ),
+                                              ),
+                                            ],
                                           ),
                                         ],
-                                      ),
-                                    ),
-                                    Expanded(
-                                      child: Text(
-                                        '\$${entry['amount'].toStringAsFixed(2)}',
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.bodyMedium?.copyWith(
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                        textAlign: TextAlign.right,
                                       ),
                                     ),
                                   ],
