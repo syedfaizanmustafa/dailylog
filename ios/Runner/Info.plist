@@ -56,5 +56,11 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>This app uses your location to select the nearest site automatically.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Location access allows automatic selection of the nearest site.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Location access allows automatic selection of the nearest site.</string>
 </dict>
 </plist>

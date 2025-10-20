@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
+import '../controllers/app_controller.dart';
 
 class LogSheetsScreen extends ConsumerStatefulWidget {
   const LogSheetsScreen({super.key});
@@ -14,9 +15,11 @@ class LogSheetsScreen extends ConsumerStatefulWidget {
 class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
   final _searchController = TextEditingController();
   String _searchQuery = '';
-  String _selectedFilter = 'all'; // 'all', 'pending', 'approved', 'rejected'
+  String _selectedFilter = 'all'; // 'all', 'pending', 'approved'
   bool _isLoading = true;
   List<Map<String, dynamic>> _entries = [];
+  String? _selectedLocationId;
+  final Set<String> _approvingEntries = {};
 
   @override
   void initState() {
@@ -48,27 +51,32 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         final email = data['email'] ?? '';
         final userId = data['userId'] ?? '';
 
-        // Calculate total amount from sheets data
+        // Calculate total amount and section breakdowns from sheets data
         double totalAmount = 0.0;
+        double aluminiumTotal = 0.0;
+        double glassTotal = 0.0;
+        double petePlasticTotal = 0.0;
+        double otherCommoditiesTotal = 0.0;
         for (final sheet in sheets.values) {
           final sheetData = sheet['data'] as Map<String, dynamic>?;
           if (sheetData != null) {
             final values = sheetData['values'] as List<dynamic>? ?? [];
-            // Sum up the paid amounts (columns 4, 9, 14, 19 - TOTAL PAID columns)
             for (int i = 0; i < values.length; i++) {
-              final row = i ~/ 21;
               final col = i % 21;
-              if (col == 4 || col == 9 || col == 14 || col == 19) {
-                // TOTAL PAID columns
-                final value = values[i].toString();
-                if (value.isNotEmpty) {
-                  try {
-                    totalAmount += double.parse(value);
-                  } catch (e) {
-                    // Skip invalid numbers
-                  }
+              final value = values[i].toString();
+              if (value.isEmpty) continue;
+              try {
+                final numValue = double.parse(value);
+                if (col == 4) {
+                  aluminiumTotal += numValue; totalAmount += numValue;
+                } else if (col == 9) {
+                  glassTotal += numValue; totalAmount += numValue;
+                } else if (col == 14) {
+                  petePlasticTotal += numValue; totalAmount += numValue;
+                } else if (col == 19) {
+                  otherCommoditiesTotal += numValue; totalAmount += numValue;
                 }
-              }
+              } catch (_) {}
             }
           }
         }
@@ -82,6 +90,16 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
           'email': email,
           'userId': userId,
           'type': 'entry',
+          'aluminiumTotal': aluminiumTotal,
+          'glassTotal': glassTotal,
+          'petePlasticTotal': petePlasticTotal,
+          'otherCommoditiesTotal': otherCommoditiesTotal,
+          'approved': (data['approved'] as bool?) ?? false,
+          'locationId': (data['location'] is String && (data['location'] as String).isNotEmpty)
+              ? data['location'] as String
+              : (data['locationRef'] is DocumentReference
+                  ? (data['locationRef'] as DocumentReference).id
+                  : null),
         });
       }
 
@@ -155,6 +173,36 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
     }
   }
 
+  Future<void> _approveEntry(String entryId) async {
+    setState(() {
+      _approvingEntries.add(entryId);
+    });
+    try {
+      await FirebaseFirestore.instance.collection('entries').doc(entryId).update({
+        'approved': true,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Entry approved')),
+        );
+        _loadEntries();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error approving entry: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _approvingEntries.remove(entryId);
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -164,8 +212,11 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
           IconButton(icon: const Icon(Icons.refresh), onPressed: _loadEntries),
         ],
       ),
-      body: Column(
-        children: [
+      body: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
           Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
@@ -232,14 +283,77 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                         },
                       ),
                       const SizedBox(width: 8),
-                      FilterChip(
-                        label: const Text('Rejected'),
-                        selected: _selectedFilter == 'rejected',
-                        onSelected: (selected) {
-                          setState(() {
-                            _selectedFilter = 'rejected';
-                          });
+                      InputChip(
+                        label: Text(_selectedLocationId == null
+                            ? 'Location'
+                            : 'Location: ' + (ref.read(appControllerProvider).locations.firstWhere(
+                                  (l) => l.id == _selectedLocationId!,
+                                  orElse: () => const AppLocation(id: '', name: 'Unknown', address: '', latitude: 0, longitude: 0),
+                                ).name)),
+                        onPressed: () {
+                          final locations = ref.read(appControllerProvider).locations;
+                          showModalBottomSheet(
+                            context: context,
+                            isScrollControlled: true,
+                            builder: (context) {
+                              return SafeArea(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16.0),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          const Text('Filter by Location', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                                          TextButton(
+                                            onPressed: () {
+                                              setState(() {
+                                                _selectedLocationId = null;
+                                              });
+                                              Navigator.of(context).pop();
+                                            },
+                                            child: const Text('Clear'),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Flexible(
+                                        child: ListView.builder(
+                                          shrinkWrap: true,
+                                          itemCount: locations.length,
+                                          itemBuilder: (context, index) {
+                                            final loc = locations[index];
+                                            final selected = _selectedLocationId == loc.id;
+                                            return ListTile(
+                                              title: Text(loc.name.isEmpty ? '(Unnamed location)' : loc.name),
+                                              subtitle: loc.address.isNotEmpty ? Text(loc.address) : null,
+                                              trailing: selected ? const Icon(Icons.check, color: Colors.green) : null,
+                                              onTap: () {
+                                                setState(() {
+                                                  _selectedLocationId = loc.id;
+                                                });
+                                                Navigator.of(context).pop();
+                                              },
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          );
                         },
+                        onDeleted: _selectedLocationId == null
+                            ? null
+                            : () {
+                                setState(() {
+                                  _selectedLocationId = null;
+                                });
+                              },
                       ),
                     ],
                   ),
@@ -247,12 +361,13 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
               ],
             ),
           ),
-          Expanded(
-            child:
-                _isLoading
-                    ? const Center(child: CircularProgressIndicator())
-                    : Column(
-                      children: [
+          _isLoading
+              ? const Padding(
+                  padding: EdgeInsets.only(top: 48.0),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              : Column(
+                  children: [
                         // Submitted Entries Section
                         if (_entries.isNotEmpty) ...[
                           Padding(
@@ -272,373 +387,250 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                             ),
                           ),
                           const SizedBox(height: 8),
-                          Expanded(
-                            flex: 1,
-                            child: ListView.builder(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                              ),
-                              itemCount: _entries.length,
-                              itemBuilder: (context, index) {
-                                final entry = _entries[index];
-                                final date = entry['date'] as DateTime;
-                                final email = entry['email'] as String;
-
-                                // Apply search filter
-                                if (_searchQuery.isNotEmpty) {
-                                  final searchLower =
-                                      _searchQuery.toLowerCase();
-                                  if (!email.toLowerCase().contains(
-                                        searchLower,
-                                      ) &&
-                                      !entry['reference']
-                                          .toString()
-                                          .toLowerCase()
-                                          .contains(searchLower)) {
-                                    return const SizedBox.shrink();
+                          Consumer(
+                            builder: (context, ref, _) {
+                              // Filter entries based on current filter state
+                              final filteredEntries = _entries.where((entry) {
+                                final isApproved = entry['approved'] == true;
+                                
+                                // Apply approval filter
+                                if (_selectedFilter == 'approved' && !isApproved) {
+                                  return false;
+                                }
+                                if (_selectedFilter == 'pending' && isApproved) {
+                                  return false;
+                                }
+                                
+                                // Apply location filter
+                                if (_selectedLocationId != null) {
+                                  final locId = entry['locationId'] as String?;
+                                  if (locId == null || locId != _selectedLocationId) {
+                                    return false;
                                   }
                                 }
+                                
+                                // Apply search filter
+                                if (_searchQuery.isNotEmpty) {
+                                  final searchLower = _searchQuery.toLowerCase();
+                                  final email = entry['email'] as String;
+                                  final reference = entry['reference'].toString();
+                                  if (!email.toLowerCase().contains(searchLower) &&
+                                      !reference.toLowerCase().contains(searchLower)) {
+                                    return false;
+                                  }
+                                }
+                                
+                                return true;
+                              }).toList();
+                              
+                              return ListView.builder(
+                                shrinkWrap: true,
+                                physics: const NeverScrollableScrollPhysics(),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                ),
+                                itemCount: filteredEntries.length,
+                                itemBuilder: (context, index) {
+                                  final entry = filteredEntries[index];
+                                  final date = entry['date'] as DateTime;
+                                  final email = entry['email'] as String;
+                                  final isApproved = entry['approved'] == true;
 
-                                return Card(
-                                  margin: const EdgeInsets.symmetric(
-                                    vertical: 4,
-                                  ),
-                                  child: ListTile(
-                                    leading: CircleAvatar(
-                                      backgroundColor:
-                                          Theme.of(context).colorScheme.primary,
-                                      child: const Icon(
-                                        Icons.assignment,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                    title: Text(
-                                      DateFormat('MMM d, y').format(date),
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    subtitle: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'Reference: ${entry['reference']}',
-                                        ),
-                                        Text('Email: $email'),
-                                        Text(
-                                          '${entry['sheetCount']} sheet${entry['sheetCount'] == 1 ? '' : 's'} - \$${entry['amount'].toStringAsFixed(2)}',
-                                        ),
-                                      ],
-                                    ),
-                                    trailing: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          icon: const Icon(Icons.visibility),
-                                          onPressed: () {
-                                            context.push(
-                                              '/view-entry/${entry['id']}',
-                                            );
-                                          },
-                                        ),
-                                        IconButton(
-                                          icon: const Icon(
-                                            Icons.delete,
-                                            color: Colors.red,
-                                          ),
-                                          onPressed: () {
-                                            showDialog(
-                                              context: context,
-                                              builder:
-                                                  (context) => AlertDialog(
-                                                    title: const Text(
-                                                      'Delete Entry',
-                                                    ),
-                                                    content: Text(
-                                                      'Are you sure you want to delete this entry for ${entry['email']}?',
-                                                    ),
-                                                    actions: [
-                                                      TextButton(
-                                                        onPressed:
-                                                            () => Navigator.pop(
-                                                              context,
-                                                            ),
-                                                        child: const Text(
-                                                          'Cancel',
-                                                        ),
-                                                      ),
-                                                      TextButton(
-                                                        onPressed: () {
-                                                          Navigator.pop(
-                                                            context,
-                                                          );
-                                                          _deleteEntry(
-                                                            entry['id'],
-                                                          );
-                                                        },
-                                                        child: const Text(
-                                                          'Delete',
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                            );
-                                          },
+                                return GestureDetector(
+                                  onTap: () => context.push('/view-entry/${entry['id']}'),
+                                  child: Container(
+                                    margin: const EdgeInsets.symmetric(vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      borderRadius: BorderRadius.circular(12),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withOpacity(0.05),
+                                          blurRadius: 8,
+                                          offset: const Offset(0, 2),
                                         ),
                                       ],
                                     ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
-                        ],
-
-                        // Logs Section
-                        Expanded(
-                          flex: 1,
-                          child: StreamBuilder<QuerySnapshot>(
-                            stream:
-                                FirebaseFirestore.instance
-                                    .collection('logs')
-                                    .orderBy('createdAt', descending: true)
-                                    .snapshots(),
-                            builder: (context, snapshot) {
-                              if (snapshot.hasError) {
-                                return Center(
-                                  child: Text('Error: ${snapshot.error}'),
-                                );
-                              }
-
-                              if (snapshot.connectionState ==
-                                  ConnectionState.waiting) {
-                                return const Center(
-                                  child: CircularProgressIndicator(),
-                                );
-                              }
-
-                              final logs =
-                                  snapshot.data!.docs.where((doc) {
-                                    final data =
-                                        doc.data() as Map<String, dynamic>;
-                                    final status =
-                                        data['status']?.toString() ?? '';
-                                    final customerName =
-                                        data['customerName']
-                                            ?.toString()
-                                            .toLowerCase() ??
-                                        '';
-                                    final description =
-                                        data['description']
-                                            ?.toString()
-                                            .toLowerCase() ??
-                                        '';
-
-                                    // Apply status filter
-                                    if (_selectedFilter != 'all' &&
-                                        status != _selectedFilter) {
-                                      return false;
-                                    }
-
-                                    // Apply search filter
-                                    return customerName.contains(
-                                          _searchQuery,
-                                        ) ||
-                                        description.contains(_searchQuery);
-                                  }).toList();
-
-                              if (logs.isEmpty && _entries.isEmpty) {
-                                return const Center(
-                                  child: Text('No logs or entries found'),
-                                );
-                              }
-
-                              if (logs.isEmpty) {
-                                return const SizedBox.shrink();
-                              }
-
-                              return Column(
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 16.0,
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        const Icon(Icons.note, size: 20),
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          'Log Entries',
-                                          style: Theme.of(
-                                            context,
-                                          ).textTheme.titleMedium?.copyWith(
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Expanded(
-                                    child: ListView.builder(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                      ),
-                                      itemCount: logs.length,
-                                      itemBuilder: (context, index) {
-                                        final log = logs[index];
-                                        final data =
-                                            log.data() as Map<String, dynamic>;
-                                        final customerName =
-                                            data['customerName'] ??
-                                            'No customer';
-                                        final description =
-                                            data['description'] ??
-                                            'No description';
-                                        final status =
-                                            data['status'] ?? 'pending';
-                                        final createdAt =
-                                            (data['createdAt'] as Timestamp?)
-                                                ?.toDate() ??
-                                            DateTime.now();
-                                        final createdBy =
-                                            data['createdBy'] ?? 'Unknown';
-
-                                        return Card(
-                                          margin: const EdgeInsets.symmetric(
-                                            vertical: 4,
-                                          ),
-                                          child: ExpansionTile(
-                                            leading: CircleAvatar(
-                                              backgroundColor: _getStatusColor(
-                                                status,
-                                              ),
-                                              child: Text(
-                                                status[0].toUpperCase(),
-                                              ),
-                                            ),
-                                            title: Text(customerName),
-                                            subtitle: Text(
-                                              'Created by $createdBy on ${DateFormat('MMM d, y').format(createdAt)}',
-                                            ),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(16),
+                                      child: Column(
+                                        children: [
+                                          Row(
                                             children: [
-                                              Padding(
-                                                padding: const EdgeInsets.all(
-                                                  16.0,
-                                                ),
+                                              Expanded(
+                                                flex: 2,
                                                 child: Column(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
                                                   children: [
                                                     Text(
-                                                      'Description: $description',
+                                                      DateFormat('MM/dd/yyyy').format(date),
+                                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                                        color: Theme.of(context).colorScheme.primary,
+                                                        fontWeight: FontWeight.w500,
+                                                      ),
                                                     ),
-                                                    const SizedBox(height: 16),
-                                                    Row(
-                                                      mainAxisAlignment:
-                                                          MainAxisAlignment
-                                                              .spaceEvenly,
-                                                      children: [
-                                                        if (status ==
-                                                            'pending') ...[
-                                                          ElevatedButton(
-                                                            onPressed:
-                                                                () =>
-                                                                    _updateLogStatus(
-                                                                      log.id,
-                                                                      'approved',
-                                                                    ),
-                                                            style: ElevatedButton.styleFrom(
-                                                              backgroundColor:
-                                                                  Colors.green,
-                                                            ),
-                                                            child: const Text(
-                                                              'Approve',
-                                                            ),
-                                                          ),
-                                                          ElevatedButton(
-                                                            onPressed:
-                                                                () =>
-                                                                    _updateLogStatus(
-                                                                      log.id,
-                                                                      'rejected',
-                                                                    ),
-                                                            style:
-                                                                ElevatedButton.styleFrom(
-                                                                  backgroundColor:
-                                                                      Colors
-                                                                          .red,
-                                                                ),
-                                                            child: const Text(
-                                                              'Reject',
-                                                            ),
-                                                          ),
-                                                        ],
-                                                        IconButton(
-                                                          icon: const Icon(
-                                                            Icons.delete,
-                                                            color: Colors.red,
-                                                          ),
-                                                          onPressed: () {
-                                                            showDialog(
-                                                              context: context,
-                                                              builder:
-                                                                  (
-                                                                    context,
-                                                                  ) => AlertDialog(
-                                                                    title: const Text(
-                                                                      'Delete Log',
-                                                                    ),
-                                                                    content: Text(
-                                                                      'Are you sure you want to delete this log for $customerName?',
-                                                                    ),
-                                                                    actions: [
-                                                                      TextButton(
-                                                                        onPressed:
-                                                                            () => Navigator.pop(
-                                                                              context,
-                                                                            ),
-                                                                        child: const Text(
-                                                                          'Cancel',
-                                                                        ),
-                                                                      ),
-                                                                      TextButton(
-                                                                        onPressed: () {
-                                                                          Navigator.pop(
-                                                                            context,
-                                                                          );
-                                                                          _deleteLog(
-                                                                            log.id,
-                                                                          );
-                                                                        },
-                                                                        child: const Text(
-                                                                          'Delete',
-                                                                        ),
-                                                                      ),
-                                                                    ],
-                                                                  ),
-                                                            );
-                                                          },
-                                                        ),
-                                                      ],
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      '${entry['reference']}',
+                                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                                        color: Theme.of(context).colorScheme.secondary,
+                                                      ),
                                                     ),
                                                   ],
                                                 ),
                                               ),
+                                              Expanded(
+                                                flex: 2,
+                                                child: Column(
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      '${entry['sheetCount']} sheet${entry['sheetCount'] == 1 ? '' : 's'}',
+                                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                                        color: Theme.of(context).colorScheme.primary,
+                                                        fontWeight: FontWeight.w500,
+                                                      ),
+                                                    ),
+                                                    const SizedBox(height: 4),
+                                                    Text(
+                                                      email,
+                                                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontSize: 12),
+                                                      overflow: TextOverflow.ellipsis,
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                              Expanded(
+                                                child: Text(
+                                                  '\$${(entry['amount'] as double?)?.toStringAsFixed(2) ?? '0.00'}',
+                                                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                                                  textAlign: TextAlign.right,
+                                                ),
+                                              ),
                                             ],
                                           ),
-                                        );
-                                      },
+                                          const SizedBox(height: 12),
+                                          // Section breakdown, matching SubmittedScreen style
+                                          Container(
+                                            padding: const EdgeInsets.all(12),
+                                            decoration: BoxDecoration(
+                                              color: Colors.grey[50],
+                                              borderRadius: BorderRadius.circular(8),
+                                              border: Border.all(color: Colors.grey[200]!),
+                                            ),
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  'Total Paid Breakdown',
+                                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                                        fontWeight: FontWeight.w600,
+                                                        color: Colors.grey[700],
+                                                      ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                Row(
+                                                  children: [
+                                                    Expanded(
+                                                      child: _buildSectionItem(
+                                                        'Aluminium',
+                                                        (entry['aluminiumTotal'] as double?) ?? 0.0,
+                                                        Colors.blue[600]!,
+                                                      ),
+                                                    ),
+                                                    Expanded(
+                                                      child: _buildSectionItem(
+                                                        'Glass',
+                                                        (entry['glassTotal'] as double?) ?? 0.0,
+                                                        Colors.green[600]!,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                                const SizedBox(height: 8),
+                                                Row(
+                                                  children: [
+                                                    Expanded(
+                                                      child: _buildSectionItem(
+                                                        'Pete Plastic',
+                                                        (entry['petePlasticTotal'] as double?) ?? 0.0,
+                                                        Colors.orange[600]!,
+                                                      ),
+                                                    ),
+                                                    Expanded(
+                                                      child: _buildSectionItem(
+                                                        'Other Commodities',
+                                                        (entry['otherCommoditiesTotal'] as double?) ?? 0.0,
+                                                        Colors.purple[600]!,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(height: 12),
+                                          Row(
+                                            mainAxisAlignment: MainAxisAlignment.end,
+                                            children: [
+                                              IconButton(
+                                                icon: const Icon(Icons.visibility),
+                                                tooltip: 'View',
+                                                onPressed: () => context.push('/view-entry/${entry['id']}'),
+                                              ),
+                                              if ((entry['approved'] as bool?) != true)
+                                                OutlinedButton.icon(
+                                                  onPressed: _approvingEntries.contains(entry['id'] as String) ? null : () => _approveEntry(entry['id'] as String),
+                                                  icon: _approvingEntries.contains(entry['id'] as String)
+                                                      ? const SizedBox(
+                                                          width: 16,
+                                                          height: 16,
+                                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                                        )
+                                                      : const Icon(Icons.check, size: 18),
+                                                  label: Text(_approvingEntries.contains(entry['id'] as String) ? 'Approving...' : 'Approve'),
+                                                ),
+                                              IconButton(
+                                                icon: const Icon(Icons.delete, color: Colors.red),
+                                                tooltip: 'Delete',
+                                                onPressed: () {
+                                                  showDialog(
+                                                    context: context,
+                                                    builder: (context) => AlertDialog(
+                                                      title: const Text('Delete Entry'),
+                                                      content: Text('Are you sure you want to delete this entry for ${entry['email']}?'),
+                                                      actions: [
+                                                        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+                                                        TextButton(
+                                                          onPressed: () {
+                                                            Navigator.pop(context);
+                                                            _deleteEntry(entry['id']);
+                                                          },
+                                                          child: const Text('Delete'),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  );
+                                                },
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ),
-                                ],
-                              );
+                                );
+                              },
+                            );
                             },
                           ),
-                        ),
+                        ],
+
+
                       ],
                     ),
+            ],
+          ),
           ),
         ],
       ),
@@ -656,5 +648,29 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
       default:
         return Colors.grey;
     }
+  }
+
+  Widget _buildSectionItem(String label, double amount, Color color) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Colors.grey[600],
+                fontSize: 11,
+              ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '\$${amount.toStringAsFixed(2)}',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.w600,
+                color: color,
+                fontSize: 12,
+              ),
+        ),
+      ],
+    );
   }
 }

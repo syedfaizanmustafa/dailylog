@@ -7,10 +7,24 @@ import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../controllers/app_controller.dart';
 import '../controllers/auth_controller.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:signature/signature.dart';
+
+class _TwoDimensionalScrollBehavior extends MaterialScrollBehavior {
+  const _TwoDimensionalScrollBehavior();
+
+  @override
+  Set<ui.PointerDeviceKind> get dragDevices => {
+        ui.PointerDeviceKind.touch,
+        ui.PointerDeviceKind.mouse,
+        ui.PointerDeviceKind.trackpad,
+        ui.PointerDeviceKind.stylus,
+        ui.PointerDeviceKind.invertedStylus,
+      };
+}
 
 class NewEntryScreen extends ConsumerStatefulWidget {
   const NewEntryScreen({super.key});
@@ -64,6 +78,13 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     // CUSTOMER SIGN
     signColWidth,
   ];
+  double get _totalGridWidth {
+    try {
+      return columnWidths.fold(0.0, (sum, w) => sum + w) + 32.0; // padding allowance
+    } catch (_) {
+      return 1200.0;
+    }
+  }
   late List<List<String>> gridData;
   final ScrollController _horizontalController = ScrollController();
 
@@ -77,6 +98,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
 
   // Loading state for submission
   bool _isSubmitting = false;
+  // Note: refreshed in the later initState after sheet init
 
   // Selected date for the entry
   DateTime _selectedDate = DateTime.now();
@@ -205,6 +227,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     // Calculate initial totals
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _calculateAndUpdateTotals();
+      // After first layout, refresh nearest location so UI picks it up
+      final container = ProviderScope.containerOf(context, listen: false);
+      container.read(appControllerProvider.notifier).refreshNearest();
     });
   }
 
@@ -839,26 +864,37 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                               fontSize: 14,
                             ),
                           ),
-                          Text(
-                            '1935 Anderson Road',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w500,
-                              fontSize: 14,
-                            ),
-                          ),
-                          Text(
-                            'Davis CA',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w500,
-                              fontSize: 14,
-                            ),
-                          ),
-                          Text(
-                            '95616',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w500,
-                              fontSize: 14,
-                            ),
+                          Consumer(
+                            builder: (context, ref, _) {
+                              final appState = ref.watch(appControllerProvider);
+                              final address = appState.nearestLocation?.address ?? '';
+
+                              if (address.isEmpty) {
+                                return const Text(
+                                  'Detecting location...',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w500,
+                                    fontSize: 14,
+                                  ),
+                                );
+                              }
+
+                              final lines = address.split('\n');
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  for (final line in lines)
+                                    Text(
+                                      line,
+                                      softWrap: true,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w500,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                ],
+                              );
+                            },
                           ),
                         ],
                       ),
@@ -2243,11 +2279,35 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   ) async {
     final Map<String, dynamic> entryData = {
       'userId': userId,
+      // Firestore reference to the user document
+      'userRef': FirebaseFirestore.instance.collection('users').doc(userId),
       'email': email,
       'createdAt': DateTime.now().toIso8601String(),
       'entryDate': _selectedDate.toIso8601String(),
+      // New moderation/location fields
+      'approved': false, // default sheet approval status
+      'accepted': false, // legacy fields retained if used elsewhere
+      'rejected': false,
+      // Prefer storing locationRef; keep legacy 'location' for compatibility
+      'location': null, // location id string (legacy)
+      'locationRef': null, // DocumentReference to locations/{id}
       'sheets': {},
     };
+
+    try {
+      // Try to use nearest location from app controller as default selection
+      final container = ProviderScope.containerOf(context, listen: false);
+      final appState = container.read(appControllerProvider);
+      final nearest = appState.nearestLocation;
+      if (nearest != null) {
+        entryData['location'] = nearest.id;
+        entryData['locationRef'] = FirebaseFirestore.instance
+            .collection('locations')
+            .doc(nearest.id);
+        // Optionally add address for display convenience
+        entryData['locationAddress'] = nearest.address;
+      }
+    } catch (_) {}
 
     // Process each sheet with validation
     for (final entry in _sheetsGridData.entries) {
@@ -2332,6 +2392,17 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     print('Final entry data keys: ${entryData.keys}');
     print('Sheets count: ${(entryData['sheets'] as Map).length}');
 
+    // If a location id has been selected earlier and placed into entryData['location'],
+    // also set a proper DocumentReference for stronger consistency.
+    try {
+      final dynamic maybeLocationId = entryData['location'];
+      if (maybeLocationId is String && maybeLocationId.isNotEmpty) {
+        entryData['locationRef'] = FirebaseFirestore.instance
+            .collection('locations')
+            .doc(maybeLocationId);
+      }
+    } catch (_) {}
+
     return entryData;
   }
 
@@ -2344,11 +2415,13 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
 
       final basicEntry = {
         'userId': userId,
+        'userRef': FirebaseFirestore.instance.collection('users').doc(userId),
         'userName': userName,
         'createdAt': DateTime.now().toIso8601String(),
         'entryType': 'basic',
         'hasGridData': false,
         'sheetCount': _sheetsGridData.length,
+        'approved': false,
       };
 
       print('Basic entry data: $basicEntry');
@@ -2745,17 +2818,42 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
         ],
       ),
       body: SafeArea(
-        child: Column(
+        child: ScrollConfiguration(
+          behavior: const _TwoDimensionalScrollBehavior(),
+          child: Column(
           children: [
             // Main scrollable content area
             Expanded(
               child: SingleChildScrollView(
+                primary: true,
+                physics: const AlwaysScrollableScrollPhysics(),
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   controller: _horizontalController,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [_buildStaticDetails(), _buildGrid()],
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final screenW = MediaQuery.of(context).size.width;
+                      return ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minWidth: _totalGridWidth > screenW ? _totalGridWidth : screenW,
+                          minHeight: 1,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              width: _totalGridWidth,
+                              child: _buildStaticDetails(),
+                            ),
+                            SizedBox(
+                              width: _totalGridWidth,
+                              child: _buildGrid(),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                 ),
               ),
@@ -3023,6 +3121,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
           ],
         ),
       ),
+    )
     );
   }
 }

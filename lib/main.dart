@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'config/app_theme.dart';
 import 'config/router.dart';
 import 'firebase_options.dart';
+import 'controllers/app_controller.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,6 +45,8 @@ class MyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(routerProvider);
+    // Trigger app controller initialization early
+    ref.watch(appControllerProvider);
 
     return MaterialApp.router(
       title: 'Record App',

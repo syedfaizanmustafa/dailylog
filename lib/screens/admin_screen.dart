@@ -25,7 +25,8 @@ class AdminScreen extends ConsumerWidget {
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
@@ -40,12 +41,13 @@ class AdminScreen extends ConsumerWidget {
               ),
             ),
             const SizedBox(height: 32),
-            Expanded(
-              child: GridView.count(
-                crossAxisCount: 2,
-                mainAxisSpacing: 16,
-                crossAxisSpacing: 16,
-                children: [
+            GridView.count(
+              crossAxisCount: 2,
+              mainAxisSpacing: 16,
+              crossAxisSpacing: 16,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              children: [
                   _buildOptionCard(
                     context,
                     title: 'Manage Users',
@@ -55,15 +57,29 @@ class AdminScreen extends ConsumerWidget {
                   ),
                   _buildOptionCard(
                     context,
+                    title: 'New Entry',
+                    description: 'Create a new daily log entry',
+                    icon: Icons.add_circle,
+                    onTap: () => context.push('/new-entry'),
+                  ),
+                  _buildOptionCard(
+                    context,
                     title: 'Manage Log Sheets',
                     description: 'View and manage daily log entries',
                     icon: Icons.assignment,
                     onTap: () => context.push('/admin/logs'),
                   ),
-                ],
-              ),
+                  _buildOptionCard(
+                    context,
+                    title: 'Manage Locations',
+                    description: 'Add and edit locations (name, coords, address)',
+                    icon: Icons.location_on,
+                    onTap: () => context.push('/admin/locations'),
+                    ),
+              ],
             ),
           ],
+          ),
         ),
       ),
     );

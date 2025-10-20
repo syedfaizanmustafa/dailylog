@@ -230,11 +230,102 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     });
   }
 
-  void _editCell(int row, int col) {
+  Future<void> _approveEntry() async {
+    if (_entryData == null) return;
+    
+    try {
+      await FirebaseFirestore.instance
+          .collection('entries')
+          .doc(widget.entryId)
+          .update({
+        'approved': true,
+        'approvedAt': DateTime.now().toIso8601String(),
+      });
+      
+      setState(() {
+        _entryData!['approved'] = true;
+        _entryData!['approvedAt'] = DateTime.now().toIso8601String();
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Entry approved successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error approving entry: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  bool _isSpOrSwColumn(int col) {
+    // SW columns: 0, 5, 10, 16 (first column of each section)
+    // SP columns: 3, 8, 13, 18 (fourth column of each section)
+    // CODE column: 15 (standalone column after TP-PL)
+    return col == 0 ||
+        col == 3 ||
+        col == 5 ||
+        col == 8 ||
+        col == 10 ||
+        col == 13 ||
+        col == 15 ||
+        col == 16 ||
+        col == 18;
+  }
+
+  // Helper method to parse a cell value and return its numeric value
+  double _parseCellValue(String value) {
+    if (value.isEmpty) return 0.0;
+
+    // Handle dual values like "2/4" - calculate as 2 + 4 = 6
+    if (value.contains('/')) {
+      final parts = value.split('/');
+      if (parts.length == 2) {
+        final part1 = double.tryParse(parts[0].trim()) ?? 0.0;
+        final part2 = double.tryParse(parts[1].trim()) ?? 0.0;
+        return part1 + part2;
+      }
+    }
+
+    // Handle single values
+    return double.tryParse(value.trim()) ?? 0.0;
+  }
+
+  // Helper method to get column width for totals row
+  double _getColumnWidth(int col) {
+    if (col < 4) return colWidth; // ALUMINIUM
+    if (col == 4) return paidColWidth; // ALUMINIUM paid
+    if (col < 9) return colWidth; // GLASS
+    if (col == 9) return paidColWidth; // GLASS paid
+    if (col < 14) return colWidth; // PETE PLASTIC
+    if (col == 14) return paidColWidth; // PETE PLASTIC paid
+    if (col == 15) return colWidth; // CODE
+    if (col < 20) return colWidth; // OTHER COMMODITIES
+    if (col == 20) return paidColWidth; // OTHER COMMODITIES paid
+    return colWidth; // Default
+  }
+
+  void _editCell(int row, int col, {bool isLongPress = false}) {
     if (_isReadOnly) return;
 
-    // Handle signature cells (column 20)
-    if (col == 20) {
+    // Handle SP and SW columns with long press for dual input
+    if (_isSpOrSwColumn(col) && isLongPress) {
+      // For view-only mode, we'll just show a simple dialog
+      _showDualInputDialog(row, col);
+      return;
+    }
+
+    // Handle signature cells (column 21)
+    if (col == 21) {
       context.push(
         '/customer',
         extra: {
@@ -307,6 +398,86 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
             ],
           ),
     );
+  }
+
+  Future<void> _showDualInputDialog(int row, int col) async {
+    TextEditingController controllerA = TextEditingController();
+    TextEditingController controllerB = TextEditingController();
+
+    // Parse existing value if it's in a/b format
+    String currentValue = _currentGridData[row][col];
+    if (currentValue.contains('/')) {
+      final parts = currentValue.split('/');
+      if (parts.length == 2) {
+        controllerA.text = parts[0].trim();
+        controllerB.text = parts[1].trim();
+      }
+    } else if (currentValue.isNotEmpty) {
+      controllerA.text = currentValue;
+    }
+
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Enter values for cell [${row + 1}, ${col + 1}] (Long Press Mode)'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controllerA,
+                keyboardType: TextInputType.number,
+                autofocus: true,
+                decoration: InputDecoration(
+                  hintText: 'Enter value A',
+                  border: OutlineInputBorder(),
+                  labelText: 'Value A',
+                ),
+              ),
+              SizedBox(height: 8),
+              TextField(
+                controller: controllerB,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  hintText: 'Enter value B',
+                  border: OutlineInputBorder(),
+                  labelText: 'Value B',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, null),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final valueA = controllerA.text.trim();
+                final valueB = controllerB.text.trim();
+                if (valueA.isNotEmpty && valueB.isNotEmpty) {
+                  Navigator.pop(context, {'a': valueA, 'b': valueB});
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Please enter both values'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+              },
+              child: Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result != null) {
+      setState(() {
+        _currentGridData[row][col] = '${result['a']}/${result['b']}';
+      });
+    }
   }
 
   Future<void> _saveChanges() async {
@@ -614,6 +785,14 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   }
 
   Widget _buildStaticDetails() {
+    final entryDate = _entryData?['entryDate'] != null 
+        ? DateTime.parse(_entryData!['entryDate'])
+        : DateTime.now();
+    final location = _entryData?['location'] as String? ?? 'Unknown Location';
+    final isApproved = _entryData?['approved'] == true;
+    final reference = _entryData?['reference'] as String? ?? 'N/A';
+    final serialNumber = _entryData?['serialNumber'] as String? ?? 'N/A';
+    
     return Container(
       margin: const EdgeInsets.all(16),
       padding: const EdgeInsets.all(16),
@@ -631,22 +810,112 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Daily Log Sheet',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-              fontWeight: FontWeight.bold,
-              color: Theme.of(context).colorScheme.primary,
-            ),
+          // Header row with location and approval status
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Location: $location',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Date: ${DateFormat('MM/dd/yyyy').format(entryDate)}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: isApproved ? Colors.green[100] : Colors.orange[100],
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: isApproved ? Colors.green : Colors.orange,
+                        width: 1,
+                      ),
+                    ),
+                    child: Text(
+                      isApproved ? 'APPROVED' : 'PENDING',
+                      style: TextStyle(
+                        color: isApproved ? Colors.green[800] : Colors.orange[800],
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  if (!isApproved)
+                    ElevatedButton.icon(
+                      onPressed: () => _approveEntry(),
+                      icon: const Icon(Icons.check, size: 16),
+                      label: const Text('Approve'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        minimumSize: Size.zero,
+                        textStyle: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                ],
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Text(
-            'Date: ${DateFormat('MM/dd/yyyy').format(DateTime.now())}',
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Sheet Number: $_currentSheetNumber',
-            style: Theme.of(context).textTheme.bodyMedium,
+          const SizedBox(height: 12),
+          // Details row with reference and serial number
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Reference: $reference',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Serial Number: $serialNumber',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    'Sheet $_currentSheetNumber of ${_sheetsGridData.length}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w500,
+                      color: Theme.of(context).colorScheme.secondary,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Created: ${DateFormat('MM/dd/yyyy HH:mm').format(_createdAt ?? DateTime.now())}',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ],
       ),
@@ -654,17 +923,64 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   }
 
   Widget _buildGrid() {
-    return Column(
-      children: [
-        // Section headers (top row)
-        Row(
-          children: [
-            for (int i = 0; i < 4; i++)
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      controller: _horizontalController,
+      child: Column(
+        children: [
+          // Section headers (top row)
+          Row(
+            children: [
+              for (int i = 0; i < 4; i++)
+                Container(
+                  width: (colWidth * 3 + colWidth + paidColWidth),
+                  height: 40,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    border: Border.all(color: Colors.black, width: 1),
+                  ),
+                  child: Text(
+                    sectionHeaders[i],
+                    style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 14,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ),
+              // Extra Total Paid block (visual alignment like NewEntry)
               Container(
-                width:
-                    colWidth * 3 +
-                    colWidth +
-                    paidColWidth, // 3 CRV + 1 NON-CRV + 1 PAID
+                width: colWidth,
+                height: 40,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  border: Border(
+                    top: BorderSide(color: Colors.black, width: 2),
+                    right: BorderSide(color: Colors.black, width: 2),
+                    bottom: BorderSide.none,
+                    left: BorderSide(color: Colors.black, width: 2),
+                  ),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    Text(
+                      '',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 14,
+                        letterSpacing: 1.2,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+              // Customer sign
+              Container(
+                width: signColWidth,
                 height: 40,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
@@ -672,117 +988,150 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                   border: Border.all(color: Colors.black, width: 1),
                 ),
                 child: Text(
-                  sectionHeaders[i],
+                  sectionHeaders[4],
                   style: TextStyle(
                     fontWeight: FontWeight.w900,
                     fontSize: 14,
                     letterSpacing: 1.2,
                   ),
-                ),
-              ),
-            // Customer sign
-            Container(
-              width: signColWidth,
-              height: 40,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                border: Border.all(color: Colors.black, width: 1),
-              ),
-              child: Text(
-                sectionHeaders[4],
-                style: TextStyle(
-                  fontWeight: FontWeight.w900,
-                  fontSize: 14,
-                  letterSpacing: 1.2,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ],
-        ),
-        // Sub-header row (second row)
-        Row(
-          children: [
-            for (int i = 0; i < 4; i++) ...[
-              // CRV WEIGHT (spans 3 columns)
-              Container(
-                width: colWidth * 3,
-                height: 60,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Colors.grey[100],
-                  border: Border.all(color: Colors.black, width: 1),
-                ),
-                child: Text(
-                  'CRV WEIGHT',
-                  style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
-                ),
-              ),
-              // NON-CRV WEIGHT (spans 1 column)
-              Container(
-                width: colWidth,
-                height: 60,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Colors.grey[100],
-                  border: Border.all(color: Colors.black, width: 1),
-                ),
-                child: Text(
-                  'NON-CRV\nWEIGHT',
-                  style: TextStyle(fontWeight: FontWeight.w500, fontSize: 11),
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 2,
                   textAlign: TextAlign.center,
                 ),
               ),
-              // TOTAL PAID (spans 1 column, paidColWidth)
+            ],
+          ),
+          // Sub-header row (second row)
+          Row(
+            children: [
+              for (int i = 0; i < 4; i++) ...[
+                // CRV WEIGHT (spans 3 columns)
+                Container(
+                  width: colWidth * 3,
+                  height: 60,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[100],
+                    border: Border.all(color: Colors.black, width: 1),
+                  ),
+                  child: Text(
+                    'CRV WEIGHT',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                ),
+                // NON-CRV WEIGHT (spans 1 column)
+                Container(
+                  width: colWidth,
+                  height: 60,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[100],
+                    border: Border.all(color: Colors.black, width: 1),
+                  ),
+                  child: Text(
+                    'NON-CRV\nWEIGHT',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 11),
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 2,
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+                // Optional label alignment like NewEntry (Total Paid small box)
+                if (i == 3)
+                  Container(
+                    width: colWidth,
+                    height: 60,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      border: const Border(
+                        left: BorderSide(color: Colors.black, width: 1),
+                        right: BorderSide(color: Colors.black, width: 1),
+                      ),
+                    ),
+                    child: const Text(
+                      'Total \nPaid',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 2,
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                // TOTAL PAID (spans 1 column, paidColWidth)
+                Container(
+                  width: paidColWidth,
+                  height: 60,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    border: const Border(
+                      top: BorderSide.none,
+                      right: BorderSide(color: Colors.black, width: 2),
+                      bottom: BorderSide(color: Colors.black, width: 0),
+                      left: BorderSide(color: Colors.black, width: 2),
+                    ),
+                  ),
+                  child: const Column(
+                    children: [
+                      Text(
+                        'Total Paid',
+                        maxLines: 2,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 14,
+                          letterSpacing: 1.2,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              // Customer sign
               Container(
-                width: paidColWidth,
+                width: signColWidth,
                 height: 60,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: Colors.grey[100],
                   border: Border.all(color: Colors.black, width: 1),
                 ),
-                child: Text(
-                  'TOTAL PAID',
+                child: const Text(
+                  'CUSTOMER SIGN AND NAME OR I.D.',
                   style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  textAlign: TextAlign.center,
                 ),
               ),
             ],
-            // Customer sign
-            Container(
-              width: signColWidth,
-              height: 60,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.grey[100],
-                border: Border.all(color: Colors.black, width: 1),
-              ),
-              child: Text(
-                'CUSTOMER SIGN AND NAME OR I.D.',
-                style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ],
-        ),
-        // Column headers (third row)
-        Row(
-          children: [
-            for (int i = 0; i < 4; i++) ...[
+          ),
+          // Column headers (third row)
+          Row(
+            children: [
+              // ALUMINIUM section headers (columns 0-4)
               Container(
                 width: colWidth,
                 height: 32,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: Colors.grey[200],
+                  color: Colors.blue[50],
                   border: Border.all(color: Colors.black, width: 1),
                 ),
-                child: Text(
-                  'SW',
-                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SW',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
                 ),
               ),
               Container(
@@ -816,12 +1165,24 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                 height: 32,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: Colors.grey[200],
+                  color: Colors.blue[50],
                   border: Border.all(color: Colors.black, width: 1),
                 ),
-                child: Text(
-                  'SP',
-                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SP',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
                 ),
               ),
               Container(
@@ -833,48 +1194,359 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                   border: Border.all(color: Colors.black, width: 1),
                 ),
                 child: Text(
-                  sectionHeaders[i],
+                  'ALUMINIUM',
                   style: TextStyle(fontWeight: FontWeight.w600, fontSize: 11),
                   overflow: TextOverflow.ellipsis,
                   maxLines: 1,
                   textAlign: TextAlign.center,
                 ),
               ),
+              // GLASS section headers (columns 5-9)
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SW',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SC',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'C',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SP',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: paidColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'GLASS',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 11),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // #1 PETE PLASTIC section headers (columns 10-14)
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SW',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SC',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'C',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SP',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: paidColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'PETE',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 11),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // CODE column header (column 15)
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'Code',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+              ),
+              // OTHER COMMODITIES section headers (columns 16-19)
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SW',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SC',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'C',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'SP',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      'Long press',
+                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                width: paidColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  border: Border(
+                    top: BorderSide.none,
+                    right: BorderSide(color: Colors.black, width: 2),
+                    // right border
+                    bottom: BorderSide(color: Colors.black, width: 2),
+                    // right border
+                    left: BorderSide(
+                      color: Colors.black,
+                      width: 2,
+                    ), // no left border
+                  ),
+                ),
+                child: Text(
+                  '',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 11),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // Customer sign
+              Container(
+                width: signColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SIGN/ID',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+              ),
             ],
-            // Customer sign
-            Container(
-              width: signColWidth,
-              height: 32,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.grey[200],
-                border: Border.all(color: Colors.black, width: 1),
-              ),
-              child: Text(
-                'SIGN/ID',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ],
-        ),
-        // Grid rows (vertical scroll)
-        SizedBox(
-          height: 48.0 * rowCount,
-          width: 4 * (colWidth * 4 + paidColWidth) + signColWidth,
-          child: ListView.builder(
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: rowCount,
-            itemBuilder: (context, row) {
-              return Row(
-                children: [
-                  for (int sec = 0; sec < 4; sec++) ...[
+          ),
+          // Grid rows (vertical scroll)
+          SizedBox(
+            height: 48.0 * rowCount,
+            width: 3 * (colWidth * 4 + paidColWidth) + colWidth + (colWidth * 4 + paidColWidth + signColWidth),
+            child: ListView.builder(
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: rowCount,
+              itemBuilder: (context, row) {
+                return Row(
+                  children: [
+                    // ALUMINIUM section (columns 0-4)
                     for (int col = 0; col < 4; col++)
                       GestureDetector(
-                        onTap:
-                            _isReadOnly
-                                ? null
-                                : () => _editCell(row, sec * 5 + col),
+                        onTap: _isReadOnly ? null : () => _editCell(row, col),
+                        onLongPress: _isReadOnly ? null : (_isSpOrSwColumn(col) ? () => _editCell(row, col, isLongPress: true) : null),
                         child: Container(
                           width: colWidth,
                           height: 48,
@@ -884,17 +1556,14 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                             color: _isReadOnly ? Colors.grey[50] : Colors.white,
                           ),
                           child: Text(
-                            _currentGridData[row][sec * 5 + col],
+                            _currentGridData[row][col],
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       ),
-                    // Paid column
+                    // ALUMINIUM paid column (column 4)
                     GestureDetector(
-                      onTap:
-                          _isReadOnly
-                              ? null
-                              : () => _editCell(row, sec * 5 + 4),
+                      onTap: _isReadOnly ? null : () => _editCell(row, 4),
                       child: Container(
                         width: paidColWidth,
                         height: 48,
@@ -904,33 +1573,543 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                           color: _isReadOnly ? Colors.grey[50] : Colors.white,
                         ),
                         child: Text(
-                          _currentGridData[row][sec * 5 + 4],
+                          _currentGridData[row][4],
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     ),
-                  ],
-                  // Customer sign
-                  GestureDetector(
-                    onTap: _isReadOnly ? null : () => _editCell(row, 20),
-                    child: Container(
-                      width: signColWidth,
+                    // GLASS section (columns 5-9)
+                    for (int col = 5; col < 9; col++)
+                      GestureDetector(
+                        onTap: _isReadOnly ? null : () => _editCell(row, col),
+                        onLongPress: _isReadOnly ? null : (_isSpOrSwColumn(col) ? () => _editCell(row, col, isLongPress: true) : null),
+                        child: Container(
+                          width: colWidth,
+                          height: 48,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.black, width: 1),
+                            color: _isReadOnly ? Colors.grey[50] : Colors.white,
+                          ),
+                          child: Text(
+                            _currentGridData[row][col],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    // GLASS paid column (column 9)
+                    GestureDetector(
+                      onTap: _isReadOnly ? null : () => _editCell(row, 9),
+                      child: Container(
+                        width: paidColWidth,
+                        height: 48,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.black, width: 1),
+                          color: _isReadOnly ? Colors.grey[50] : Colors.white,
+                        ),
+                        child: Text(
+                          _currentGridData[row][9],
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    // #1 PETE PLASTIC section (columns 10-14)
+                    for (int col = 10; col < 14; col++)
+                      GestureDetector(
+                        onTap: _isReadOnly ? null : () => _editCell(row, col),
+                        onLongPress: _isReadOnly ? null : (_isSpOrSwColumn(col) ? () => _editCell(row, col, isLongPress: true) : null),
+                        child: Container(
+                          width: colWidth,
+                          height: 48,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.black, width: 1),
+                            color: _isReadOnly ? Colors.grey[50] : Colors.white,
+                          ),
+                          child: Text(
+                            _currentGridData[row][col],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    // #1 PETE PLASTIC paid column (column 14)
+                    GestureDetector(
+                      onTap: _isReadOnly ? null : () => _editCell(row, 14),
+                      child: Container(
+                        width: paidColWidth,
+                        height: 48,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.black, width: 1),
+                          color: _isReadOnly ? Colors.grey[50] : Colors.white,
+                        ),
+                        child: Text(
+                          _currentGridData[row][14],
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    // CODE column (column 15)
+                    GestureDetector(
+                      onTap: _isReadOnly ? null : () => _editCell(row, 15),
+                      child: Container(
+                        width: colWidth,
+                        height: 48,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.black, width: 1),
+                          color: _isReadOnly ? Colors.grey[50] : Colors.white,
+                        ),
+                        child: Text(
+                          _currentGridData[row][15],
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                    // OTHER COMMODITIES section (columns 16-20)
+                    for (int col = 16; col < 20; col++)
+                      GestureDetector(
+                        onTap: _isReadOnly ? null : () => _editCell(row, col),
+                        onLongPress: _isReadOnly ? null : (_isSpOrSwColumn(col) ? () => _editCell(row, col, isLongPress: true) : null),
+                        child: Container(
+                          width: colWidth,
+                          height: 48,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.black, width: 1),
+                            color: _isReadOnly ? Colors.grey[50] : Colors.white,
+                          ),
+                          child: Text(
+                            _currentGridData[row][col],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                    // OTHER COMMODITIES paid column (column 20) - Auto-calculated, not editable
+                    Container(
+                      width: paidColWidth,
                       height: 48,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
                         border: Border.all(color: Colors.black, width: 1),
                         color: _isReadOnly ? Colors.grey[50] : Colors.white,
                       ),
-                      child: _buildSignatureCell(row, 20),
+                      child: Text(
+                        _currentGridData[row][20],
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    // Customer sign (column 21)
+                    GestureDetector(
+                      onTap: _isReadOnly ? null : () => _editCell(row, 21),
+                      child: Container(
+                        width: signColWidth,
+                        height: 48,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.black, width: 1),
+                          color: _isReadOnly ? Colors.grey[50] : Colors.white,
+                        ),
+                        child: _buildSignatureCell(row, 21),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Totals header row (matching new entry screen)
+          Row(
+            children: [
+              // ALUMINIUM totals
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SW',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SC',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'C',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SP',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: paidColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'TP-AL',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // GLASS totals
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SW',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SC',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'C',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SP',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: paidColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'TP-GL',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // #1 PETE PLASTIC totals
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SW',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SC',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'C',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SP',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: paidColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'TP-PE',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // CODE totals
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'Code',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // OTHER COMMODITIES totals
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SW',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SC',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'C',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // SP column for OTHER COMMODITIES
+              Container(
+                width: colWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'SP',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              // Total Paid column
+              // Grand Total (merged TP and GRAND TOTAL)
+              Container(
+                width: signColWidth + paidColWidth,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.orange[100],
+                  border: Border.all(color: Colors.black, width: 1),
+                ),
+                child: Text(
+                  'GRAND TOTAL',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ),
+          // Add an empty editable row below with calculated totals
+          Builder(
+            builder: (context) {
+              // Calculate totals for each column
+              final totals = List.generate(22, (col) {
+                if (col == 15) {
+                  // CODE column - show count of entries instead of sum
+                  int count = 0;
+                  for (int row = 0; row < rowCount; row++) {
+                    if (row < _currentGridData.length &&
+                        col < _currentGridData[row].length &&
+                        _currentGridData[row][col].isNotEmpty) {
+                      count++;
+                    }
+                  }
+                  return count > 0 ? 'Count: $count' : '';
+                } else {
+                  double total = 0.0;
+                  for (int row = 0; row < rowCount; row++) {
+                    if (row < _currentGridData.length &&
+                        col < _currentGridData[row].length) {
+                      total += _parseCellValue(_currentGridData[row][col]);
+                    }
+                  }
+                  return total.toStringAsFixed(2);
+                }
+              });
+
+              // Calculate grand total of the "Total Paid" column (column 20)
+              double grandTotal = 0.0;
+              for (int row = 0; row < rowCount; row++) {
+                if (row < _currentGridData.length &&
+                    20 < _currentGridData[row].length) {
+                  grandTotal += _parseCellValue(_currentGridData[row][20]);
+                }
+              }
+
+              return Row(
+                children: [
+                  for (int col = 0; col < 20; col++)
+                    Container(
+                      width: _getColumnWidth(col),
+                      height: 32,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.black, width: 1),
+                        color: Colors.blue[50], // Different color to indicate it's the totals row
+                      ),
+                      child: Text(
+                        totals[col],
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  // Grand Total (merged cell showing the grand total value)
+                  Container(
+                    width: signColWidth + paidColWidth,
+                    height: 32,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.black, width: 1),
+                      color: Colors.orange[50], // Special color for grand total cell
+                    ),
+                    child: Text(
+                      grandTotal.toStringAsFixed(2),
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.orange[800],
+                        fontSize: 14,
+                      ),
                     ),
                   ),
                 ],
               );
             },
           ),
-        ),
-        const SizedBox(height: 16),
-      ],
+        ],
+      ),
     );
   }
 

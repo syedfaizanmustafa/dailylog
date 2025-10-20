@@ -14,6 +14,7 @@ import '../screens/view_entry_screen.dart';
 import '../screens/admin_screen.dart';
 import '../screens/user_management_screen.dart';
 import '../screens/log_sheets_screen.dart';
+import '../screens/locations_screen.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final authState = ref.watch(authControllerProvider);
@@ -102,6 +103,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/admin/logs',
         builder: (context, state) => const LogSheetsScreen(),
+      ),
+      GoRoute(
+        path: '/admin/locations',
+        builder: (context, state) => const LocationsScreen(),
       ),
     ],
   );
