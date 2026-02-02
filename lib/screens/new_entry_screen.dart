@@ -2284,6 +2284,8 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       'email': email,
       'createdAt': DateTime.now().toIso8601String(),
       'entryDate': _selectedDate.toIso8601String(),
+      // Normalized date key (YYYY-MM-DD) for easier querying/merging
+      'entryDateKey': DateFormat('yyyy-MM-dd').format(_selectedDate),
       // New moderation/location fields
       'approved': false, // default sheet approval status
       'accepted': false, // legacy fields retained if used elsewhere
@@ -2406,6 +2408,62 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     return entryData;
   }
 
+  // Find existing entry for the same location and date
+  Future<DocumentSnapshot?> _findExistingEntry(
+    String? locationId,
+    DateTime entryDate,
+  ) async {
+    if (locationId == null || locationId.isEmpty) {
+      print('No location ID provided, skipping existing entry check');
+      return null;
+    }
+
+    try {
+      // Normalize date to simple key (YYYY-MM-DD), matching entryDateKey stored in documents
+      final dateKey = DateFormat('yyyy-MM-dd').format(entryDate);
+
+      print('Searching for existing entry: location=$locationId, dateKey=$dateKey');
+
+      // Query for entries with the same location and date key
+      final querySnapshot = await FirebaseFirestore.instance
+          .collection('entries')
+          .where('location', isEqualTo: locationId)
+          .where('entryDateKey', isEqualTo: dateKey)
+          .limit(1)
+          .get();
+
+      if (querySnapshot.docs.isNotEmpty) {
+        print('Found existing entry: ${querySnapshot.docs.first.id}');
+        return querySnapshot.docs.first;
+      } else {
+        print('No existing entry found for location=$locationId, dateKey=$dateKey');
+      }
+    } catch (e) {
+      print('Error finding existing entry: $e');
+      // Don't throw - if we can't find existing entry, just create a new one
+    }
+
+    return null;
+  }
+
+  // Get the next available sheet number for an existing entry
+  int _getNextSheetNumber(Map<String, dynamic> existingSheets) {
+    if (existingSheets.isEmpty) {
+      return 1;
+    }
+
+    // Find the highest sheet number
+    int maxSheetNumber = 0;
+    for (final sheetKey in existingSheets.keys) {
+      final sheetNum = int.tryParse(sheetKey);
+      if (sheetNum != null && sheetNum > maxSheetNumber) {
+        maxSheetNumber = sheetNum;
+      }
+    }
+
+    return maxSheetNumber + 1;
+  }
+
   // Simple save method that just saves basic info
   Future<void> _saveBasicEntry(String userId, String userName) async {
     try {
@@ -2488,6 +2546,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       'email': email,
       'createdAt': DateTime.now().toIso8601String(),
       'entryDate': _selectedDate.toIso8601String(),
+      'entryDateKey': DateFormat('yyyy-MM-dd').format(_selectedDate),
       'sheets': {
         '1': {
           'data': {
@@ -3021,32 +3080,95 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                                     return;
                                   }
 
-                                  // Save the full entry data
-                                  final entryRef =
-                                      FirebaseFirestore.instance
-                                          .collection('entries')
-                                          .doc();
-                                  await entryRef.set(entryData);
+                                  // Check if an entry exists for the same location and date
+                                  final locationId = entryData['location'] as String?;
+                                  final existingEntryDoc = await _findExistingEntry(
+                                    locationId,
+                                    _selectedDate,
+                                  );
 
-                                  // Save signature points to subcollections
-                                  for (final entry
-                                      in _sheetsSignaturePoints.entries) {
-                                    final sheetNumber = entry.key;
+                                  DocumentReference entryRef;
+                                  Map<String, dynamic> sheetsToSave = {};
+                                  Map<int, int> sheetNumberMapping = {}; // Maps old sheet number to new sheet number
+                                  bool isMergedEntry = false;
+
+                                  if (existingEntryDoc != null) {
+                                    isMergedEntry = true;
+                                    // Entry exists - merge sheets
+                                    _logSubmissionProgress(
+                                      'Found existing entry for same location and date. Merging sheets...',
+                                    );
+                                    
+                                    entryRef = existingEntryDoc.reference;
+                                    final existingData = existingEntryDoc.data() as Map<String, dynamic>?;
+                                    final existingSheets = existingData?['sheets'] as Map<String, dynamic>? ?? {};
+                                    
+                                    // Get the next available sheet number
+                                    int nextSheetNumber = _getNextSheetNumber(existingSheets);
+                                    
+                                    // Remap new sheet numbers to continue from existing sheets
+                                    for (final entry in _sheetsGridData.entries) {
+                                      final oldSheetNumber = entry.key;
+                                      final newSheetNumber = nextSheetNumber++;
+                                      sheetNumberMapping[oldSheetNumber] = newSheetNumber;
+                                      
+                                      // Get the sheet data from entryData
+                                      final oldSheetKey = oldSheetNumber.toString();
+                                      if (entryData['sheets'].containsKey(oldSheetKey)) {
+                                        sheetsToSave[newSheetNumber.toString()] = entryData['sheets'][oldSheetKey];
+                                      }
+                                    }
+                                    
+                                    // Merge with existing sheets
+                                    final mergedSheets = Map<String, dynamic>.from(existingSheets);
+                                    mergedSheets.addAll(sheetsToSave);
+                                    
+                                    // Update the existing entry with merged sheets
+                                    await entryRef.update({
+                                      'sheets': mergedSheets,
+                                      'updatedAt': DateTime.now().toIso8601String(),
+                                    });
+                                    
+                                    _logSubmissionProgress(
+                                      'Merged ${sheetsToSave.length} new sheet(s) into existing entry',
+                                    );
+                                  } else {
+                                    // No existing entry - create new one
+                                    _logSubmissionProgress(
+                                      'No existing entry found. Creating new entry...',
+                                    );
+                                    
+                                    entryRef = FirebaseFirestore.instance
+                                        .collection('entries')
+                                        .doc();
+                                    await entryRef.set(entryData);
+                                    
+                                    // For new entries, sheet numbers stay the same
+                                    for (final entry in _sheetsGridData.entries) {
+                                      sheetNumberMapping[entry.key] = entry.key;
+                                    }
+                                    sheetsToSave = Map<String, dynamic>.from(entryData['sheets']);
+                                  }
+
+                                  // Save signature points to subcollections with correct sheet numbers
+                                  for (final entry in _sheetsSignaturePoints.entries) {
+                                    final oldSheetNumber = entry.key;
+                                    final newSheetNumber = sheetNumberMapping[oldSheetNumber] ?? oldSheetNumber;
                                     final signaturePoints = entry.value;
 
                                     if (signaturePoints.isNotEmpty) {
                                       try {
                                         await _saveSignaturePointsToSubcollection(
                                           entryRef.id,
-                                          sheetNumber.toString(),
+                                          newSheetNumber.toString(),
                                           signaturePoints,
                                         );
                                         print(
-                                          'Saved signature points for sheet $sheetNumber',
+                                          'Saved signature points for sheet $newSheetNumber (was $oldSheetNumber)',
                                         );
                                       } catch (e) {
                                         print(
-                                          'Error saving signature points for sheet $sheetNumber: $e',
+                                          'Error saving signature points for sheet $newSheetNumber: $e',
                                         );
                                         // Continue with other sheets even if one fails
                                       }
@@ -3060,11 +3182,13 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                                   if (!mounted) return;
 
                                   // Show success message
+                                  final message = isMergedEntry
+                                      ? 'Sheets merged into existing entry successfully'
+                                      : 'Entry submitted successfully';
+                                  
                                   ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'Entry submitted successfully',
-                                      ),
+                                    SnackBar(
+                                      content: Text(message),
                                       backgroundColor: Colors.green,
                                     ),
                                   );

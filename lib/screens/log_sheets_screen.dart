@@ -51,35 +51,100 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         final email = data['email'] ?? '';
         final userId = data['userId'] ?? '';
 
-        // Calculate total amount and section breakdowns from sheets data
+        // Get SW values from the totals row (rowCount, which is index 15) for each section
+        // Sum across ALL sheets
+        double aluminiumSW = 0.0;
+        double glassSW = 0.0;
+        double petePlasticSW = 0.0;
+        double otherCommoditiesSW = 0.0;
         double totalAmount = 0.0;
-        double aluminiumTotal = 0.0;
-        double glassTotal = 0.0;
-        double petePlasticTotal = 0.0;
-        double otherCommoditiesTotal = 0.0;
-        for (final sheet in sheets.values) {
+        
+        // Helper function to parse cell value (handles dual values like "2/4")
+        double parseCellValue(String value) {
+          if (value.isEmpty) return 0.0;
+          if (value.contains('/')) {
+            final parts = value.split('/');
+            if (parts.length == 2) {
+              final part1 = double.tryParse(parts[0].trim()) ?? 0.0;
+              final part2 = double.tryParse(parts[1].trim()) ?? 0.0;
+              return part1 + part2;
+            }
+          }
+          return double.tryParse(value.trim()) ?? 0.0;
+        }
+        
+        // Loop through all sheets and sum the SW totals from each sheet's totals row
+        print('Processing ${sheets.length} sheets for entry ${doc.id}');
+        for (final sheetEntry in sheets.entries) {
+          final sheetNumber = sheetEntry.key;
+          final sheet = sheetEntry.value;
           final sheetData = sheet['data'] as Map<String, dynamic>?;
+          
           if (sheetData != null) {
             final values = sheetData['values'] as List<dynamic>? ?? [];
-            for (int i = 0; i < values.length; i++) {
-              final col = i % 21;
-              final value = values[i].toString();
-              if (value.isEmpty) continue;
-              try {
-                final numValue = double.parse(value);
-                if (col == 4) {
-                  aluminiumTotal += numValue; totalAmount += numValue;
-                } else if (col == 9) {
-                  glassTotal += numValue; totalAmount += numValue;
-                } else if (col == 14) {
-                  petePlasticTotal += numValue; totalAmount += numValue;
-                } else if (col == 19) {
-                  otherCommoditiesTotal += numValue; totalAmount += numValue;
+            final storedRows = sheetData['rows'] as int? ?? 15;
+            final cols = sheetData['columns'] as int? ?? 21;
+            
+            if (values.isEmpty || cols == 0) {
+              print('Sheet $sheetNumber: Skipping - empty values or cols');
+              continue;
+            }
+            
+            // Calculate actual row count from data length
+            final actualRowCount = (values.length / cols).floor();
+            print('Sheet $sheetNumber: storedRows=$storedRows, cols=$cols, values.length=${values.length}, actualRowCount=$actualRowCount');
+            
+            // Always calculate totals from data rows (0-14) instead of reading from stored totals row
+            // This matches how the view entry screen calculates totals on-the-fly
+            // The stored totals row might be outdated or incorrect
+            double sheetAluminiumSW = 0.0;
+            double sheetGlassSW = 0.0;
+            double sheetPeteSW = 0.0;
+            double sheetOtherSW = 0.0;
+            
+            // Calculate SW totals from data rows (0-14) only
+            for (int row = 0; row < 15 && row < actualRowCount; row++) {
+              for (int col = 0; col < cols; col++) {
+                final index = row * cols + col;
+                if (index < values.length) {
+                  final value = values[index].toString();
+                  final parsedValue = parseCellValue(value);
+                  if (col == 0) sheetAluminiumSW += parsedValue;  // Aluminium SW
+                  if (col == 5) sheetGlassSW += parsedValue;      // Glass SW
+                  if (col == 10) sheetPeteSW += parsedValue;      // Pete Plastic SW
+                  if (col == 16) sheetOtherSW += parsedValue;     // Other Commodities SW
                 }
-              } catch (_) {}
+              }
+            }
+            
+            print('Sheet $sheetNumber: Calculated SW totals from data rows - Al: $sheetAluminiumSW, Glass: $sheetGlassSW, Pete: $sheetPeteSW, Other: $sheetOtherSW');
+            aluminiumSW += sheetAluminiumSW;
+            glassSW += sheetGlassSW;
+            petePlasticSW += sheetPeteSW;
+            otherCommoditiesSW += sheetOtherSW;
+            print('Sheet $sheetNumber: Running totals - Al: $aluminiumSW, Glass: $glassSW, Pete: $petePlasticSW, Other: $otherCommoditiesSW');
+            
+            // Also calculate total amount from Total Paid columns for the main amount display
+            // Only sum from data rows (0 to 14), not the totals row
+            for (int row = 0; row < 15 && row < actualRowCount; row++) {
+              for (int col = 0; col < cols; col++) {
+                final index = row * cols + col;
+                if (index < values.length) {
+                  final value = values[index].toString();
+                  if (value.isEmpty) continue;
+                  try {
+                    final numValue = parseCellValue(value);
+                    if (col == 4 || col == 9 || col == 14 || col == 19) {
+                      totalAmount += numValue;
+                    }
+                  } catch (_) {}
+                }
+              }
             }
           }
         }
+        
+        print('Final totals - Aluminium: $aluminiumSW, Glass: $glassSW, Pete: $petePlasticSW, Other: $otherCommoditiesSW');
 
         entries.add({
           'id': doc.id,
@@ -90,10 +155,10 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
           'email': email,
           'userId': userId,
           'type': 'entry',
-          'aluminiumTotal': aluminiumTotal,
-          'glassTotal': glassTotal,
-          'petePlasticTotal': petePlasticTotal,
-          'otherCommoditiesTotal': otherCommoditiesTotal,
+          'aluminiumTotal': aluminiumSW,
+          'glassTotal': glassSW,
+          'petePlasticTotal': petePlasticSW,
+          'otherCommoditiesTotal': otherCommoditiesSW,
           'approved': (data['approved'] as bool?) ?? false,
           'locationId': (data['location'] is String && (data['location'] as String).isNotEmpty)
               ? data['location'] as String
@@ -663,7 +728,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         ),
         const SizedBox(height: 2),
         Text(
-          '\$${amount.toStringAsFixed(2)}',
+          amount.toStringAsFixed(2),
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 fontWeight: FontWeight.w600,
                 color: color,

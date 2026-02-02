@@ -3,9 +3,15 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:signature/signature.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
 
 // Custom signature point class to avoid Point constructor issues
 class SignaturePoint {
@@ -265,6 +271,657 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
         );
       }
     }
+  }
+
+  // Helper method to convert signature points to PDF image
+  Future<pw.ImageProvider?> _signaturePointsToPdfImage(
+    List<SignaturePoint> points,
+    double width,
+    double height,
+    pw.Document pdf,
+  ) async {
+    if (points.length < 2) return null;
+
+    // Find bounding box
+    double minX = double.infinity;
+    double maxX = double.negativeInfinity;
+    double minY = double.infinity;
+    double maxY = double.negativeInfinity;
+
+    for (final point in points) {
+      minX = min(minX, point.dx);
+      maxX = max(maxX, point.dx);
+      minY = min(minY, point.dy);
+      maxY = max(maxY, point.dy);
+    }
+
+    final sigWidth = maxX - minX;
+    final sigHeight = maxY - minY;
+    if (sigWidth <= 0 || sigHeight <= 0) return null;
+
+    // Create a picture recorder to render the signature
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final paint = Paint()
+      ..color = Colors.black
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round;
+
+    // Calculate scale to fit in the cell
+    final scaleX = width / sigWidth;
+    final scaleY = height / sigHeight;
+    final scale = min(scaleX, scaleY) * 0.9;
+
+    // Center the signature
+    final offsetX = (width - sigWidth * scale) / 2;
+    final offsetY = (height - sigHeight * scale) / 2;
+
+    // Draw signature lines
+    for (int i = 0; i < points.length - 1; i++) {
+      final p1 = points[i];
+      final p2 = points[i + 1];
+
+      if (p1.type == 1 || p2.type == 1) {
+        final x1 = (p1.dx - minX) * scale + offsetX;
+        final y1 = (p1.dy - minY) * scale + offsetY;
+        final x2 = (p2.dx - minX) * scale + offsetX;
+        final y2 = (p2.dy - minY) * scale + offsetY;
+
+        canvas.drawLine(Offset(x1, y1), Offset(x2, y2), paint);
+      }
+    }
+
+    // Convert picture to image
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(width.toInt(), height.toInt());
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    if (byteData == null) return null;
+
+    final imageBytes = byteData.buffer.asUint8List();
+    
+    // Create PDF image
+    return pw.MemoryImage(imageBytes);
+  }
+
+  Future<void> _generateAndSharePDF() async {
+    if (_entryData == null) return;
+
+    try {
+      // Show loading indicator
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Generating PDF...'),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+
+      final pdf = pw.Document();
+      final entryDate = _entryData!['entryDate'] != null 
+          ? DateTime.parse(_entryData!['entryDate'])
+          : DateTime.now();
+      final location = _entryData!['location'] as String? ?? 'Unknown Location';
+      final isApproved = _entryData!['approved'] == true;
+      final reference = _entryData!['reference'] as String? ?? 'N/A';
+      final serialNumber = _entryData!['serialNumber'] as String? ?? 'N/A';
+
+      // Generate PDF for each sheet
+      for (final sheetEntry in _sheetsGridData.entries) {
+        final sheetNumber = sheetEntry.key;
+        final gridData = sheetEntry.value;
+        
+        // Pre-render all signatures to images for this sheet
+        final signatureImages = <String, pw.ImageProvider?>{};
+        const double signCellWidth = 100.0;
+        const double signCellHeight = 20.0;
+
+        for (int row = 0; row < rowCount; row++) {
+          final signatureKey = '$row-21';
+          final signaturePoints = _sheetsSignaturePoints[sheetNumber]?[signatureKey];
+          if (signaturePoints != null && signaturePoints.isNotEmpty) {
+            final imageProvider = await _signaturePointsToPdfImage(
+              signaturePoints,
+              signCellWidth - 4,
+              signCellHeight - 4,
+              pdf,
+            );
+            signatureImages[signatureKey] = imageProvider;
+          }
+        }
+        
+        pdf.addPage(
+          pw.Page(
+            pageFormat: PdfPageFormat.a4.landscape,
+            margin: const pw.EdgeInsets.all(10),
+            build: (pw.Context context) {
+              return pw.FittedBox(
+                fit: pw.BoxFit.scaleDown,
+                alignment: pw.Alignment.topLeft,
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  mainAxisSize: pw.MainAxisSize.min,
+                  children: [
+                    // Header section
+                    _buildPDFHeader(location, entryDate, isApproved, reference, serialNumber, sheetNumber),
+                    pw.SizedBox(height: 5),
+                    
+                    // Grid section
+                    _buildPDFGrid(gridData, sheetNumber, signatureImages),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      }
+
+      // Save PDF directly to file
+      final pdfBytes = await pdf.save();
+      
+      // Create filename using already defined variables
+      final locationName = location.replaceAll(' ', '_').replaceAll('/', '_');
+      final fileName = 'Entry_${locationName}_${DateFormat('yyyyMMdd').format(entryDate)}_${widget.entryId.substring(0, 8)}.pdf';
+      
+      // Save to file first
+      final directory = await getApplicationDocumentsDirectory();
+      final filePath = '${directory.path}/$fileName';
+      final file = File(filePath);
+      await file.writeAsBytes(pdfBytes);
+      
+      // Share the PDF file (opens share dialog to save/share)
+      await Printing.sharePdf(
+        bytes: pdfBytes,
+        filename: fileName,
+      );
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('PDF saved: $fileName'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error generating PDF: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  pw.Widget _buildPDFHeader(
+    String location,
+    DateTime entryDate,
+    bool isApproved,
+    String reference,
+    String serialNumber,
+    int sheetNumber,
+  ) {
+    return pw.Container(
+      padding: const pw.EdgeInsets.all(16),
+      // No border - removed border decoration
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          // First row: Location and Date only (no approval badge)
+          pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text(
+                'Location: $location',
+                style: pw.TextStyle(
+                  fontSize: 14,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PdfColors.blue700,
+                ),
+              ),
+              pw.SizedBox(height: 4),
+              pw.Text(
+                'Date: ${DateFormat('MM/dd/yyyy').format(entryDate)}',
+                style: const pw.TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 12),
+          // Details row with reference/serial on left, sheet/created at extreme right
+          pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text(
+                    'Reference: $reference',
+                    style: pw.TextStyle(
+                      fontSize: 12,
+                      fontWeight: pw.FontWeight.normal,
+                    ),
+                  ),
+                  pw.SizedBox(height: 4),
+                  pw.Text(
+                    'Serial Number: $serialNumber',
+                    style: pw.TextStyle(
+                      fontSize: 12,
+                      fontWeight: pw.FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
+              pw.SizedBox(width: 20), // Spacer to push content to extreme right
+              pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.end,
+                children: [
+                  pw.Text(
+                    'Sheet $sheetNumber of ${_sheetsGridData.length}',
+                    style: pw.TextStyle(
+                      fontSize: 12,
+                      fontWeight: pw.FontWeight.normal,
+                      color: PdfColors.grey700,
+                    ),
+                  ),
+                  if (_createdAt != null) ...[
+                    pw.SizedBox(height: 4),
+                    pw.Text(
+                      'Created: ${DateFormat('MM/dd/yyyy HH:mm').format(_createdAt!)}',
+                      style: pw.TextStyle(
+                        fontSize: 10,
+                        color: PdfColors.grey600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+          if (_userEmail != null) ...[
+            pw.SizedBox(height: 4),
+            pw.Text(
+              'Email: $_userEmail',
+              style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  pw.Widget _buildPDFGrid(
+    List<List<String>> gridData,
+    int sheetNumber,
+    Map<String, pw.ImageProvider?> signatureImages,
+  ) {
+    // Reduced sizes to fit on one page
+    const double cellWidth = 32.0;
+    const double cellHeight = 20.0;
+    const double paidCellWidth = 40.0;
+    const double signCellWidth = 100.0;
+
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.black, width: 1),
+      columnWidths: {
+        0: const pw.FixedColumnWidth(cellWidth), // SW
+        1: const pw.FixedColumnWidth(cellWidth), // SC
+        2: const pw.FixedColumnWidth(cellWidth), // C
+        3: const pw.FixedColumnWidth(cellWidth), // SP
+        4: const pw.FixedColumnWidth(paidCellWidth), // ALUMINIUM paid
+        5: const pw.FixedColumnWidth(cellWidth), // SW
+        6: const pw.FixedColumnWidth(cellWidth), // SC
+        7: const pw.FixedColumnWidth(cellWidth), // C
+        8: const pw.FixedColumnWidth(cellWidth), // SP
+        9: const pw.FixedColumnWidth(paidCellWidth), // GLASS paid
+        10: const pw.FixedColumnWidth(cellWidth), // SW
+        11: const pw.FixedColumnWidth(cellWidth), // SC
+        12: const pw.FixedColumnWidth(cellWidth), // C
+        13: const pw.FixedColumnWidth(cellWidth), // SP
+        14: const pw.FixedColumnWidth(paidCellWidth), // PETE paid
+        15: const pw.FixedColumnWidth(cellWidth), // CODE
+        16: const pw.FixedColumnWidth(cellWidth), // SW
+        17: const pw.FixedColumnWidth(cellWidth), // SC
+        18: const pw.FixedColumnWidth(cellWidth), // C
+        19: const pw.FixedColumnWidth(cellWidth), // SP
+        20: const pw.FixedColumnWidth(paidCellWidth), // OTHER paid
+        21: const pw.FixedColumnWidth(signCellWidth), // SIGN
+      },
+      children: [
+        // Section headers row - all 22 columns
+        pw.TableRow(
+          decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+          children: [
+            // ALUMINIUM section (5 cells)
+            _buildPDFCell('ALUMINIUM', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', paidCellWidth, cellHeight, PdfColors.grey300),
+            // GLASS section (5 cells)
+            _buildPDFCell('GLASS', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', paidCellWidth, cellHeight, PdfColors.grey300),
+            // PETE PLASTIC section (5 cells)
+            _buildPDFCell('#1 PETE PLASTIC', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', paidCellWidth, cellHeight, PdfColors.grey300),
+            // CODE (1 cell)
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            // OTHER COMMODITIES section (5 cells)
+            _buildPDFCell('OTHER COMMODITIES', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', cellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('', paidCellWidth, cellHeight, PdfColors.grey300),
+            // SIGN (1 cell)
+            _buildPDFCell('CUSTOMER SIGN AND NAME OR I.D.', signCellWidth, cellHeight, PdfColors.grey300),
+          ],
+        ),
+        // Sub-header row - all 22 columns
+        pw.TableRow(
+          decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+          children: [
+            // ALUMINIUM section
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('NON-CRV\nWEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('Total\nPaid', paidCellWidth, cellHeight * 1.5, PdfColors.grey300),
+            // GLASS section
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('NON-CRV\nWEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('Total\nPaid', paidCellWidth, cellHeight * 1.5, PdfColors.grey300),
+            // PETE PLASTIC section
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('NON-CRV\nWEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('Total\nPaid', paidCellWidth, cellHeight * 1.5, PdfColors.grey300),
+            // CODE
+            _buildPDFCell('', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            // OTHER COMMODITIES section
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('CRV WEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('NON-CRV\nWEIGHT', cellWidth, cellHeight * 1.5, PdfColors.grey200),
+            _buildPDFCell('Total\nPaid', paidCellWidth, cellHeight * 1.5, PdfColors.grey300),
+            // SIGN
+            _buildPDFCell('CUSTOMER SIGN AND NAME OR I.D.', signCellWidth, cellHeight * 1.5, PdfColors.grey200),
+          ],
+        ),
+        // Column headers row
+        pw.TableRow(
+          decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+          children: [
+            _buildPDFCell('SW', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('SC', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('C', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('SP', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('ALUMINIUM', paidCellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('SW', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('SC', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('C', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('SP', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('GLASS', paidCellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('SW', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('SC', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('C', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('SP', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('PETE', paidCellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('Code', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('SW', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('SC', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('C', cellWidth, cellHeight, PdfColors.grey200),
+            _buildPDFCell('SP', cellWidth, cellHeight, PdfColors.blue100),
+            _buildPDFCell('', paidCellWidth, cellHeight, PdfColors.grey300),
+            _buildPDFCell('SIGN/ID', signCellWidth, cellHeight, PdfColors.grey200),
+          ],
+        ),
+        // Data rows
+        ...List.generate(rowCount, (row) {
+          return pw.TableRow(
+            children: [
+              // ALUMINIUM section
+              _buildPDFCell(gridData[row][0], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][1], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][2], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][3], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][4], paidCellWidth, cellHeight, PdfColors.white),
+              // GLASS section
+              _buildPDFCell(gridData[row][5], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][6], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][7], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][8], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][9], paidCellWidth, cellHeight, PdfColors.white),
+              // PETE PLASTIC section
+              _buildPDFCell(gridData[row][10], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][11], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][12], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][13], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][14], paidCellWidth, cellHeight, PdfColors.white),
+              // CODE
+              _buildPDFCell(gridData[row][15], cellWidth, cellHeight, PdfColors.white),
+              // OTHER COMMODITIES section
+              _buildPDFCell(gridData[row][16], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][17], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][18], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][19], cellWidth, cellHeight, PdfColors.white),
+              _buildPDFCell(gridData[row][20], paidCellWidth, cellHeight, PdfColors.white),
+              // Signature cell
+              _buildPDFSignatureCell(row, 21, signCellWidth, cellHeight, sheetNumber, signatureImages),
+            ],
+          );
+        }),
+        // Totals row
+        _buildPDFTotalsRow(gridData, cellWidth, paidCellWidth, signCellWidth, cellHeight),
+      ],
+    );
+  }
+
+  pw.Widget _buildPDFCell(String text, double width, double height, PdfColor bgColor) {
+    return pw.Container(
+      width: width,
+      height: height,
+      alignment: pw.Alignment.center,
+      decoration: pw.BoxDecoration(color: bgColor),
+      child: pw.Padding(
+        padding: const pw.EdgeInsets.all(1),
+        child: pw.Text(
+          text,
+          style: const pw.TextStyle(fontSize: 7),
+          textAlign: pw.TextAlign.center,
+          maxLines: 2,
+          overflow: pw.TextOverflow.clip,
+        ),
+      ),
+    );
+  }
+
+  pw.Widget _buildPDFMergedCell(String text, double width, double height) {
+    return pw.Container(
+      width: width,
+      height: height,
+      alignment: pw.Alignment.center,
+      decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+      child: pw.Text(
+        text,
+        style: pw.TextStyle(
+          fontSize: 10,
+          fontWeight: pw.FontWeight.bold,
+        ),
+        textAlign: pw.TextAlign.center,
+      ),
+    );
+  }
+
+  pw.Widget _buildPDFSignatureCell(
+    int row,
+    int col,
+    double width,
+    double height,
+    int sheetNumber,
+    Map<String, pw.ImageProvider?> signatureImages,
+  ) {
+    final signatureKey = '$row-$col';
+    final customerName = _sheetsCustomerNames[sheetNumber]?[signatureKey] ?? '';
+    final signatureImage = signatureImages[signatureKey];
+    final hasSignature = signatureImage != null;
+    
+    return pw.Container(
+      width: width,
+      height: height,
+      alignment: pw.Alignment.center,
+      decoration: const pw.BoxDecoration(color: PdfColors.white),
+      child: pw.Padding(
+        padding: const pw.EdgeInsets.all(2),
+        child: hasSignature
+            ? pw.Stack(
+                children: [
+                  // Customer name at top if available
+                  if (customerName.isNotEmpty)
+                    pw.Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: pw.Text(
+                        customerName,
+                        style: pw.TextStyle(
+                          fontSize: 6,
+                          fontWeight: pw.FontWeight.bold,
+                          color: PdfColors.blue700,
+                        ),
+                        textAlign: pw.TextAlign.center,
+                        maxLines: 1,
+                      ),
+                    ),
+                  // Signature image
+                  pw.Positioned(
+                    top: customerName.isNotEmpty ? 8 : 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: pw.Image(
+                      signatureImage!,
+                      fit: pw.BoxFit.contain,
+                    ),
+                  ),
+                ],
+              )
+            : pw.Text(
+                customerName.isNotEmpty ? customerName : '',
+                style: pw.TextStyle(
+                  fontSize: 6,
+                  color: PdfColors.black,
+                ),
+                textAlign: pw.TextAlign.center,
+                maxLines: 2,
+                overflow: pw.TextOverflow.clip,
+              ),
+      ),
+    );
+  }
+
+  pw.TableRow _buildPDFTotalsRow(
+    List<List<String>> gridData,
+    double cellWidth,
+    double paidCellWidth,
+    double signCellWidth,
+    double cellHeight,
+  ) {
+    // Calculate totals
+    double aluminiumTotal = 0.0;
+    double glassTotal = 0.0;
+    double peteTotal = 0.0;
+    double otherTotal = 0.0;
+    double grandTotal = 0.0;
+
+    for (int row = 0; row < rowCount; row++) {
+      aluminiumTotal += _parseCellValue(gridData[row][4]);
+      glassTotal += _parseCellValue(gridData[row][9]);
+      peteTotal += _parseCellValue(gridData[row][14]);
+      otherTotal += _parseCellValue(gridData[row][20]);
+    }
+
+    grandTotal = aluminiumTotal + glassTotal + peteTotal + otherTotal;
+
+    // Calculate individual column totals for display
+    final columnTotals = List.generate(20, (col) {
+      double total = 0.0;
+      for (int row = 0; row < rowCount; row++) {
+        if (row < gridData.length && col < gridData[row].length) {
+          total += _parseCellValue(gridData[row][col]);
+        }
+      }
+      return total;
+    });
+
+    return pw.TableRow(
+      decoration: const pw.BoxDecoration(color: PdfColors.orange50),
+      children: [
+        // ALUMINIUM section (columns 0-4)
+        _buildPDFCell(columnTotals[0].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[1].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[2].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[3].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(
+          aluminiumTotal.toStringAsFixed(2),
+          paidCellWidth,
+          cellHeight,
+          PdfColors.orange50,
+        ),
+        // GLASS section (columns 5-9)
+        _buildPDFCell(columnTotals[5].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[6].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[7].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[8].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(
+          glassTotal.toStringAsFixed(2),
+          paidCellWidth,
+          cellHeight,
+          PdfColors.orange50,
+        ),
+        // PETE PLASTIC section (columns 10-14)
+        _buildPDFCell(columnTotals[10].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[11].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[12].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[13].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(
+          peteTotal.toStringAsFixed(2),
+          paidCellWidth,
+          cellHeight,
+          PdfColors.orange50,
+        ),
+        // CODE (column 15) - show count
+        _buildPDFCell('', cellWidth, cellHeight, PdfColors.orange50),
+        // OTHER COMMODITIES section (columns 16-20)
+        _buildPDFCell(columnTotals[16].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[17].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[18].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(columnTotals[19].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
+        _buildPDFCell(
+          otherTotal.toStringAsFixed(2),
+          paidCellWidth,
+          cellHeight,
+          PdfColors.orange50,
+        ),
+        // SIGN column - show GRAND TOTAL
+        _buildPDFCell(
+          'GRAND TOTAL\n${grandTotal.toStringAsFixed(2)}',
+          signCellWidth,
+          cellHeight,
+          PdfColors.orange50,
+        ),
+      ],
+    );
   }
 
   bool _isSpOrSwColumn(int col) {
@@ -592,6 +1249,12 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       appBar: AppBar(
         title: Text(_isReadOnly ? 'View Entry' : 'Edit Entry'),
         actions: [
+          if (_entryData != null)
+            IconButton(
+              icon: const Icon(Icons.download),
+              tooltip: 'Download PDF',
+              onPressed: _generateAndSharePDF,
+            ),
           IconButton(
             icon: const Icon(Icons.home),
             tooltip: 'Home',
@@ -2283,3 +2946,4 @@ class SignaturePointsPainter extends CustomPainter {
   bool shouldRepaint(SignaturePointsPainter oldDelegate) =>
       oldDelegate.points != points;
 }
+
