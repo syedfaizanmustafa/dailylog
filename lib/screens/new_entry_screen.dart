@@ -80,7 +80,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   ];
   double get _totalGridWidth {
     try {
-      return columnWidths.fold(0.0, (sum, w) => sum + w) + 32.0; // padding allowance
+      return columnWidths.fold(0.0, (sum, w) => sum + w) + 32.0 + colWidth; // padding allowance + header Total Paid column
     } catch (_) {
       return 1200.0;
     }
@@ -108,6 +108,12 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
 
   // Map to store signature points for each sheet
   final Map<int, Map<String, List<Point>>> _sheetsSignaturePoints = {};
+
+  // Price per pound multipliers for auto-calculating Total Paid from SW (weight)
+  // Aluminum: $1.80/lb, Glass: $0.101/lb, Plastic: $1.46/lb. Other commodities = manual only.
+  double _aluminumMultiplier = 1.80;
+  double _glassMultiplier = 0.101;
+  double _plasticMultiplier = 1.46;
 
   // Helper method to compress signature data
   Map<String, String> _compressSignatures(Map<String, Uint8List>? signatures) {
@@ -295,6 +301,91 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     return double.tryParse(value.trim()) ?? 0.0;
   }
 
+  /// When an SW (weight) cell is updated, auto-fill the corresponding Total Paid
+  /// for that material: Aluminum (col 0→4), Glass (col 5→9), Plastic (col 10→14).
+  /// Other commodities (col 16) stay manual.
+  void _updatePaidFromSw(int row, int col, String swValue) {
+    if (row >= _currentGridData.length) return;
+    while (_currentGridData[row].length < 22) {
+      _currentGridData[row].add('');
+    }
+    final double weight = _parseCellValue(swValue);
+    if (col == 0) {
+      _currentGridData[row][4] = (weight * _aluminumMultiplier).toStringAsFixed(2);
+    } else if (col == 5) {
+      _currentGridData[row][9] = (weight * _glassMultiplier).toStringAsFixed(2);
+    } else if (col == 10) {
+      _currentGridData[row][14] = (weight * _plasticMultiplier).toStringAsFixed(2);
+    }
+    // col 16 = Other commodities: no auto-calc
+  }
+
+  /// Show dialog to edit the price-per-pound multiplier for a material section.
+  /// [sectionIndex] 0 = Aluminum, 1 = Glass, 2 = Plastic.
+  Future<void> _showEditMultiplierDialog(int sectionIndex) async {
+    String label;
+    double value;
+    switch (sectionIndex) {
+      case 0:
+        label = 'Aluminum (\$/pound)';
+        value = _aluminumMultiplier;
+        break;
+      case 1:
+        label = 'Glass (\$/pound)';
+        value = _glassMultiplier;
+        break;
+      case 2:
+        label = 'Plastic (\$/pound)';
+        value = _plasticMultiplier;
+        break;
+      default:
+        return;
+    }
+    final controller = TextEditingController(text: value.toString());
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Edit price: $label'),
+        content: TextField(
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'e.g. 1.80',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (v) => Navigator.pop(context, v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result == null) return;
+    final newVal = double.tryParse(result.trim());
+    if (newVal == null || newVal < 0) return;
+    setState(() {
+      switch (sectionIndex) {
+        case 0:
+          _aluminumMultiplier = newVal;
+          break;
+        case 1:
+          _glassMultiplier = newVal;
+          break;
+        case 2:
+          _plasticMultiplier = newVal;
+          break;
+      }
+    });
+  }
+
   // Method to calculate totals for each column and update the last row
   void _calculateAndUpdateTotals() {
     // Ensure all existing rows have 22 columns
@@ -467,6 +558,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       if (result != null) {
         setState(() {
           _currentGridData[row][col] = result;
+          if (col == 0 || col == 5 || col == 10) {
+            _updatePaidFromSw(row, col, result);
+          }
         });
         // Calculate totals after updating the cell
         _calculateAndUpdateTotals();
@@ -513,6 +607,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       if (result != null) {
         setState(() {
           _currentGridData[row][col] = result;
+          if (col == 0 || col == 5 || col == 10) {
+            _updatePaidFromSw(row, col, result);
+          }
         });
         // Calculate totals after updating the cell
         _calculateAndUpdateTotals();
@@ -619,6 +716,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     if (result != null) {
       setState(() {
         _currentGridData[row][col] = '${result['a']}/${result['b']}';
+        if (col == 0 || col == 5 || col == 10) {
+          _updatePaidFromSw(row, col, '${result['a']}/${result['b']}');
+        }
       });
       // Calculate totals after updating the cell
       _calculateAndUpdateTotals();
@@ -1032,10 +1132,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   }
 
   Widget _buildGrid() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      controller: _horizontalController,
+    return SizedBox(
+      width: _totalGridWidth,
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           // Section headers (top row)
           Row(
@@ -1234,30 +1334,35 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
           // Column headers (third row)
           Row(
             children: [
-              // ALUMINIUM section headers (columns 0-4)
-              Container(
-                width: colWidth,
-                height: 32,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Colors.blue[50],
-                  border: Border.all(color: Colors.black, width: 1),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      'SW',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                      ),
+              // ALUMINIUM section headers (columns 0-4) — tap SW to edit $/lb
+              Material(
+                color: Colors.blue[50],
+                child: InkWell(
+                  onTap: () => _showEditMultiplierDialog(0),
+                  child: Container(
+                    width: colWidth,
+                    height: 32,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.black, width: 1),
                     ),
-                    Text(
-                      'Long press',
-                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          'SW',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                        ),
+                        Text(
+                          '\$${_aluminumMultiplier.toStringAsFixed(2)}/lb',
+                          style: TextStyle(fontSize: 7, color: Colors.blue[700]),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
               Container(
@@ -1327,30 +1432,35 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                   textAlign: TextAlign.center,
                 ),
               ),
-              // GLASS section headers (columns 5-9)
-              Container(
-                width: colWidth,
-                height: 32,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Colors.blue[50],
-                  border: Border.all(color: Colors.black, width: 1),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      'SW',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                      ),
+              // GLASS section headers (columns 5-9) — tap SW to edit $/lb
+              Material(
+                color: Colors.blue[50],
+                child: InkWell(
+                  onTap: () => _showEditMultiplierDialog(1),
+                  child: Container(
+                    width: colWidth,
+                    height: 32,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.black, width: 1),
                     ),
-                    Text(
-                      'Long press',
-                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          'SW',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                        ),
+                        Text(
+                          '\$${_glassMultiplier.toStringAsFixed(3)}/lb',
+                          style: TextStyle(fontSize: 7, color: Colors.blue[700]),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
               Container(
@@ -1420,30 +1530,35 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                   textAlign: TextAlign.center,
                 ),
               ),
-              // #1 PETE PLASTIC section headers (columns 10-14)
-              Container(
-                width: colWidth,
-                height: 32,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Colors.blue[50],
-                  border: Border.all(color: Colors.black, width: 1),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      'SW',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                      ),
+              // #1 PETE PLASTIC section headers (columns 10-14) — tap SW to edit $/lb
+              Material(
+                color: Colors.blue[50],
+                child: InkWell(
+                  onTap: () => _showEditMultiplierDialog(2),
+                  child: Container(
+                    width: colWidth,
+                    height: 32,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.black, width: 1),
                     ),
-                    Text(
-                      'Long press',
-                      style: TextStyle(fontSize: 7, color: Colors.blue[600]),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          'SW',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
+                        ),
+                        Text(
+                          '\$${_plasticMultiplier.toStringAsFixed(2)}/lb',
+                          style: TextStyle(fontSize: 7, color: Colors.blue[700]),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
               Container(
@@ -1658,17 +1773,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
               ),
             ],
           ),
-          // Grid rows (vertical scroll)
-            SizedBox(
-              height: 48.0 * rowCount,
-              width:
-                  3 * (colWidth * 4 + paidColWidth) +
-                  colWidth +
-                  (colWidth * 4 + paidColWidth + signColWidth),
-            child: ListView.builder(
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: rowCount,
-              itemBuilder: (context, row) {
+          // Grid rows (no inner scroll - lets parent scroll view receive drags)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(rowCount, (row) {
                 return Row(
                   children: [
                     // ALUMINIUM section (columns 0-4)
@@ -1857,9 +1965,8 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                     ),
                   ],
                 );
-              },
+              }),
             ),
-          ),
           SizedBox(height: 16),
           Row(
             children: [
@@ -2880,50 +2987,54 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
         child: ScrollConfiguration(
           behavior: const _TwoDimensionalScrollBehavior(),
           child: Column(
-          children: [
-            // Main scrollable content area
-            Expanded(
-              child: SingleChildScrollView(
-                primary: true,
-                physics: const AlwaysScrollableScrollPhysics(),
+            children: [
+              // Main scrollable content area - padding is inside so content scrolls to full width
+              Expanded(
                 child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  controller: _horizontalController,
+                  primary: true,
                   physics: const AlwaysScrollableScrollPhysics(),
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      final screenW = MediaQuery.of(context).size.width;
-                      return ConstrainedBox(
-                        constraints: BoxConstraints(
-                          minWidth: _totalGridWidth > screenW ? _totalGridWidth : screenW,
-                          minHeight: 1,
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(
-                              width: _totalGridWidth,
-                              child: _buildStaticDetails(),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    controller: _horizontalController,
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 31.0),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          final screenW = MediaQuery.of(context).size.width;
+                          return ConstrainedBox(
+                            constraints: BoxConstraints(
+                              minWidth: _totalGridWidth > screenW ? _totalGridWidth : screenW,
+                              minHeight: 1,
                             ),
-                            SizedBox(
-                              width: _totalGridWidth,
-                              child: _buildGrid(),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                SizedBox(
+                                  width: _totalGridWidth,
+                                  child: _buildStaticDetails(),
+                                ),
+                                SizedBox(
+                                  width: _totalGridWidth,
+                                  child: _buildGrid(),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                      );
-                    },
+                          );
+                        },
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-            // Fixed bottom controls area
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 16.0,
-                vertical: 8.0,
-              ),
-              decoration: BoxDecoration(
+              // Fixed bottom controls area
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 31.0,
+                  vertical: 8.0,
+                ),
+                decoration: BoxDecoration(
                 color: Colors.white,
                 boxShadow: [
                   BoxShadow(
@@ -2932,12 +3043,12 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                     offset: const Offset(0, -2),
                   ),
                 ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Sheet navigation row
-                  Row(
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Sheet navigation row
+                    Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
@@ -3245,7 +3356,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
           ],
         ),
       ),
-    )
+    ),
     );
   }
 }
