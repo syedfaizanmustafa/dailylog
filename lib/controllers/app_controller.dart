@@ -7,6 +7,7 @@ class AppLocation {
   final String id;
   final String name;
   final String address;
+  final String certification;
   final double latitude;
   final double longitude;
 
@@ -14,6 +15,7 @@ class AppLocation {
     required this.id,
     required this.name,
     required this.address,
+    this.certification = '',
     required this.latitude,
     required this.longitude,
   });
@@ -29,6 +31,7 @@ class AppLocation {
         id: doc.id,
         name: data['name']?.toString() ?? '',
         address: data['address']?.toString() ?? '',
+        certification: data['certification']?.toString() ?? '',
         latitude: lat,
         longitude: lng,
       );

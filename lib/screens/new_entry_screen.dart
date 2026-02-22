@@ -2536,6 +2536,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
             .doc(effective.id);
         entryData['locationAddress'] = effective.address;
         entryData['locationName'] = effective.name;
+        entryData['locationCertification'] = effective.certification;
       }
     } catch (_) {}
 

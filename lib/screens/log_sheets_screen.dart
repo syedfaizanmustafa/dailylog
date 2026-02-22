@@ -148,6 +148,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
 
         final locationAddress = data['locationAddress'] as String? ?? '';
         final locationName = data['locationName'] as String? ?? locationAddress;
+        final locationCertification = data['locationCertification'] as String? ?? '';
 
         entries.add({
           'id': doc.id,
@@ -160,6 +161,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
           'type': 'entry',
           'locationName': locationName,
           'locationAddress': locationAddress,
+          'locationCertification': locationCertification,
           'aluminiumTotal': aluminiumSW,
           'glassTotal': glassSW,
           'petePlasticTotal': petePlasticSW,
@@ -171,6 +173,31 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                   ? (data['locationRef'] as DocumentReference).id
                   : null),
         });
+      }
+
+      // Fallback: for entries missing locationCertification (e.g. older entries), fetch from location doc
+      final locationIdsNeedingCert = <String>{};
+      for (final e in entries) {
+        final cert = e['locationCertification'] as String? ?? '';
+        final lid = e['locationId'] as String?;
+        if (cert.isEmpty && lid != null && lid.isNotEmpty) locationIdsNeedingCert.add(lid);
+      }
+      final certByLocationId = <String, String>{};
+      for (final lid in locationIdsNeedingCert) {
+        try {
+          final locSnap = await FirebaseFirestore.instance.collection('locations').doc(lid).get();
+          if (locSnap.exists) {
+            final c = locSnap.data()?['certification'] as String?;
+            if (c != null && c.isNotEmpty) certByLocationId[lid] = c;
+          }
+        } catch (_) {}
+      }
+      for (final e in entries) {
+        final cert = e['locationCertification'] as String? ?? '';
+        final lid = e['locationId'] as String?;
+        if (cert.isEmpty && lid != null && certByLocationId.containsKey(lid)) {
+          e['locationCertification'] = certByLocationId[lid]!;
+        }
       }
 
       setState(() {
@@ -556,6 +583,17 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                                                       maxLines: 2,
                                                       overflow: TextOverflow.ellipsis,
                                                     ),
+                                                    if ((entry['locationCertification'] as String?)?.isNotEmpty == true) ...[
+                                                      const SizedBox(height: 4),
+                                                      Text(
+                                                        'Certification #: ${entry['locationCertification']}',
+                                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                                          color: Colors.grey[600],
+                                                          fontSize: 11,
+                                                        ),
+                                                        overflow: TextOverflow.ellipsis,
+                                                      ),
+                                                    ],
                                                   ],
                                                 ),
                                               ),

@@ -95,16 +95,35 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
 
       print('ViewEntryScreen: Entry found, loading data...');
       final data = docSnapshot.data()!;
-      _entryData = data;
-      _userEmail = data['email'] ?? '';
-      _createdAt = DateTime.parse(data['createdAt']);
+      _entryData = Map<String, dynamic>.from(data);
+
+      // Fallback: if entry has no locationCertification (e.g. older entries), fetch from location doc
+      final locationId = _entryData!['location'] as String?;
+      final existingCert = _entryData!['locationCertification'] as String?;
+      if ((existingCert == null || existingCert.isEmpty) && locationId != null && locationId.isNotEmpty) {
+        try {
+          final locSnap = await FirebaseFirestore.instance
+              .collection('locations')
+              .doc(locationId)
+              .get();
+          if (locSnap.exists) {
+            final cert = locSnap.data()?['certification'] as String?;
+            if (cert != null && cert.isNotEmpty) {
+              _entryData!['locationCertification'] = cert;
+            }
+          }
+        } catch (_) {}
+      }
+
+      _userEmail = _entryData!['email'] ?? '';
+      _createdAt = DateTime.parse(_entryData!['createdAt']);
 
       print(
         'ViewEntryScreen: Entry data loaded - Email: $_userEmail, Created: $_createdAt',
       );
 
       // Load sheets data
-      final sheets = data['sheets'] as Map<String, dynamic>? ?? {};
+      final sheets = _entryData!['sheets'] as Map<String, dynamic>? ?? {};
       print('ViewEntryScreen: Found ${sheets.length} sheets');
 
       for (final entry in sheets.entries) {
@@ -368,14 +387,21 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       final location = _entryData!['location'] as String? ?? 'Unknown Location';
       final isApproved = _entryData!['approved'] == true;
       final reference = _entryData!['reference'] as String? ?? 'N/A';
+      final locationCertificationPdf = _entryData!['locationCertification'] as String?;
+      final certificationDisplayPdf = (locationCertificationPdf != null && locationCertificationPdf.isNotEmpty)
+          ? locationCertificationPdf
+          : reference;
       final serialNumber = _entryData!['serialNumber'] as String? ?? 'N/A';
 
       // Same content as scroll view: static details (LOG SHEET + legends) + grid only; fit to page preserving aspect ratio
+      final locationName = _entryData!['locationName'] as String?;
       final locationAddress = _entryData!['locationAddress'] as String?;
       final locationIdOrName = _entryData!['location'] as String? ?? '';
-      final address = (locationAddress != null && locationAddress.isNotEmpty)
-          ? locationAddress
-          : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
+      final locationDisplay = (locationName != null && locationName.isNotEmpty)
+          ? locationName
+          : (locationAddress != null && locationAddress.isNotEmpty)
+              ? locationAddress
+              : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
       final formattedDate = DateFormat('MM/dd/yyyy').format(entryDate);
       const double pdfCellWidth = 32.0;
       const double pdfPaidCellWidth = 40.0;
@@ -415,7 +441,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   mainAxisSize: pw.MainAxisSize.min,
                   children: [
-                    _buildPDFStaticDetails(pdfContentWidth, reference, address, formattedDate),
+                    _buildPDFStaticDetails(pdfContentWidth, certificationDisplayPdf, locationDisplay, formattedDate),
                     pw.SizedBox(height: 5),
                     _buildPDFGrid(gridData, sheetNumber, signatureImages),
                   ],
@@ -429,9 +455,9 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       // Save PDF directly to file
       final pdfBytes = await pdf.save();
       
-      // Create filename using already defined variables
-      final locationName = location.replaceAll(' ', '_').replaceAll('/', '_');
-      final fileName = 'Entry_${locationName}_${DateFormat('yyyyMMdd').format(entryDate)}_${widget.entryId.substring(0, 8)}.pdf';
+      // Create filename using already defined variables (use locationDisplay for readable name)
+      final locationNameForFile = locationDisplay.replaceAll(' ', '_').replaceAll('/', '_');
+      final fileName = 'Entry_${locationNameForFile}_${DateFormat('yyyyMMdd').format(entryDate)}_${widget.entryId.substring(0, 8)}.pdf';
       
       // Save to file first
       final directory = await getApplicationDocumentsDirectory();
@@ -1516,11 +1542,18 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
         : DateTime.now();
     final formattedDate = DateFormat('MM/dd/yyyy').format(entryDate);
     final reference = _entryData?['reference'] as String? ?? 'N/A';
+    final locationCertification = _entryData?['locationCertification'] as String?;
+    final certificationDisplay = (locationCertification != null && locationCertification.isNotEmpty)
+        ? locationCertification
+        : reference;
+    final locationName = _entryData?['locationName'] as String?;
     final locationAddress = _entryData?['locationAddress'] as String?;
     final locationIdOrName = _entryData?['location'] as String? ?? '';
-    final address = (locationAddress != null && locationAddress.isNotEmpty)
-        ? locationAddress
-        : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
+    final locationDisplay = (locationName != null && locationName.isNotEmpty)
+        ? locationName
+        : (locationAddress != null && locationAddress.isNotEmpty)
+            ? locationAddress
+            : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
 
     return SizedBox(
       width: _totalGridWidth,
@@ -1579,7 +1612,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
-                              reference,
+                              certificationDisplay,
                               style: TextStyle(
                                 fontWeight: FontWeight.w500,
                                 fontSize: 14,
@@ -1593,7 +1626,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                               ),
                             ),
                             Text(
-                              address.replaceAll('\n', ' '),
+                              locationDisplay.replaceAll('\n', ' '),
                               softWrap: true,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
