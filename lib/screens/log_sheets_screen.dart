@@ -146,6 +146,9 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         
         print('Final totals - Aluminium: $aluminiumSW, Glass: $glassSW, Pete: $petePlasticSW, Other: $otherCommoditiesSW');
 
+        final locationAddress = data['locationAddress'] as String? ?? '';
+        final locationName = data['locationName'] as String? ?? locationAddress;
+
         entries.add({
           'id': doc.id,
           'date': createdAt,
@@ -155,6 +158,8 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
           'email': email,
           'userId': userId,
           'type': 'entry',
+          'locationName': locationName,
+          'locationAddress': locationAddress,
           'aluminiumTotal': aluminiumSW,
           'glassTotal': glassSW,
           'petePlasticTotal': petePlasticSW,
@@ -477,10 +482,14 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                                 // Apply search filter
                                 if (_searchQuery.isNotEmpty) {
                                   final searchLower = _searchQuery.toLowerCase();
-                                  final email = entry['email'] as String;
-                                  final reference = entry['reference'].toString();
+                                  final email = (entry['email'] as String?) ?? '';
+                                  final reference = (entry['reference'] as String?) ?? '';
+                                  final locationName = (entry['locationName'] as String?) ?? '';
+                                  final locationAddress = (entry['locationAddress'] as String?) ?? '';
                                   if (!email.toLowerCase().contains(searchLower) &&
-                                      !reference.toLowerCase().contains(searchLower)) {
+                                      !reference.toLowerCase().contains(searchLower) &&
+                                      !locationName.toLowerCase().contains(searchLower) &&
+                                      !locationAddress.toLowerCase().contains(searchLower)) {
                                     return false;
                                   }
                                 }
@@ -536,10 +545,16 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                                                     ),
                                                     const SizedBox(height: 4),
                                                     Text(
-                                                      '${entry['reference']}',
+                                                      (entry['locationName'] as String?)?.isNotEmpty == true
+                                                          ? (entry['locationName'] as String)
+                                                          : (entry['locationAddress'] as String?)?.isNotEmpty == true
+                                                              ? (entry['locationAddress'] as String)
+                                                              : '—',
                                                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                                                         color: Theme.of(context).colorScheme.secondary,
                                                       ),
+                                                      maxLines: 2,
+                                                      overflow: TextOverflow.ellipsis,
                                                     ),
                                                   ],
                                                 ),

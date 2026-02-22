@@ -88,6 +88,9 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
           }
         }
 
+        final locationAddress = data['locationAddress'] as String? ?? '';
+        final locationName = data['locationName'] as String? ?? locationAddress;
+
         entries.add({
           'id': doc.id,
           'date': createdAt,
@@ -98,6 +101,8 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
           'sheetCount': sheetCount,
           'amount': totalAmount,
           'email': data['email'] ?? '',
+          'locationAddress': locationAddress,
+          'locationName': locationName,
           'aluminiumTotal': aluminiumTotal,
           'glassTotal': glassTotal,
           'petePlasticTotal': petePlasticTotal,
@@ -251,7 +256,9 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                                               ),
                                               const SizedBox(height: 4),
                                               Text(
-                                                '${entry['reference']}',
+                                                (entry['locationName'] as String?)?.isNotEmpty == true
+                                                    ? (entry['locationName'] as String)
+                                                    : (entry['locationAddress'] as String?) ?? '—',
                                                 style: Theme.of(
                                                   context,
                                                 ).textTheme.bodyMedium?.copyWith(
@@ -260,6 +267,8 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                                                         context,
                                                       ).colorScheme.secondary,
                                                 ),
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
                                               ),
                                             ],
                                           ),
