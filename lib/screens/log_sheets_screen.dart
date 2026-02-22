@@ -587,7 +587,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                                               crossAxisAlignment: CrossAxisAlignment.start,
                                               children: [
                                                 Text(
-                                                  'Total Paid Breakdown',
+                                                  'Total Weight (SW) by Material',
                                                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                                         fontWeight: FontWeight.w600,
                                                         color: Colors.grey[700],
@@ -728,7 +728,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         ),
         const SizedBox(height: 2),
         Text(
-          amount.toStringAsFixed(2),
+          '${amount.toStringAsFixed(2)} lb',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 fontWeight: FontWeight.w600,
                 color: color,

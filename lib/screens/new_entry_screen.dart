@@ -115,6 +115,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   double _glassMultiplier = 0.101;
   double _plasticMultiplier = 1.46;
 
+  /// Admin-selected location override. When non-null, used instead of nearestLocation for display and submission.
+  AppLocation? _locationOverride;
+
   // Helper method to compress signature data
   Map<String, String> _compressSignatures(Map<String, Uint8List>? signatures) {
     final Map<String, String> compressedSignatures = {};
@@ -737,6 +740,93 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     );
   }
 
+  /// Show bottom sheet for admin to pick a location (address). Updates _locationOverride on selection.
+  Future<void> _showLocationPickerBottomSheet() async {
+    final locations = ref.read(appControllerProvider).locations;
+    if (locations.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No locations available')),
+        );
+      }
+      return;
+    }
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final selected = await showModalBottomSheet<AppLocation>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(ctx).size.height * 0.6,
+        ),
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          border: Border.all(color: colorScheme.outline.withOpacity(0.2)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: colorScheme.outline.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Text(
+                'Select location',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: colorScheme.onSurface,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: locations.length,
+                itemBuilder: (context, index) {
+                  final loc = locations[index];
+                  return ListTile(
+                    title: Text(
+                      loc.name,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Text(
+                      loc.address,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: colorScheme.onSurface.withOpacity(0.7),
+                      ),
+                    ),
+                    onTap: () => Navigator.pop(ctx, loc),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+    if (selected != null && mounted) {
+      setState(() => _locationOverride = selected);
+    }
+  }
+
   // Method to show Cupertino date picker
   Future<void> _showDatePicker() async {
     final DateTime? picked = await showCupertinoModalPopup<DateTime>(
@@ -922,6 +1012,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                     children: [
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
                             'CERTIFICATION #',
@@ -947,56 +1038,86 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                         ],
                       ),
                       SizedBox(width: 8),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'RC340765.001',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w500,
-                              fontSize: 14,
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'RC340765.001',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w500,
+                                fontSize: 14,
+                              ),
                             ),
-                          ),
-                          Text(
-                            'Camacho RECYCLING',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w500,
-                              fontSize: 14,
+                            Text(
+                              'Camacho RECYCLING',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w500,
+                                fontSize: 14,
+                              ),
                             ),
-                          ),
-                          Consumer(
-                            builder: (context, ref, _) {
-                              final appState = ref.watch(appControllerProvider);
-                              final address = appState.nearestLocation?.address ?? '';
+                            Consumer(
+                              builder: (context, ref, _) {
+                                final appState = ref.watch(appControllerProvider);
+                                final roleAsync = ref.watch(currentUserRoleProvider);
+                                final effectiveLocation = _locationOverride ?? appState.nearestLocation;
+                                final address = effectiveLocation?.address ?? '';
 
-                              if (address.isEmpty) {
-                                return const Text(
-                                  'Detecting location...',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w500,
-                                    fontSize: 14,
-                                  ),
-                                );
-                              }
+                                Widget content;
+                                if (address.isEmpty) {
+                                  content = const Text(
+                                    'Detecting location...',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w500,
+                                      fontSize: 14,
+                                    ),
+                                  );
+                                } else {
+                                  content = Text(
+                                    address.replaceAll('\n', ' '),
+                                    softWrap: true,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w500,
+                                      fontSize: 14,
+                                    ),
+                                  );
+                                }
 
-                              final lines = address.split('\n');
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  for (final line in lines)
-                                    Text(
-                                      line,
-                                      softWrap: true,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w500,
-                                        fontSize: 14,
+                                final isAdmin = roleAsync.valueOrNull == 'admin';
+                                if (isAdmin) {
+                                  final clickableContent = address.isEmpty
+                                      ? content
+                                      : Text(
+                                          address.replaceAll('\n', ' '),
+                                          softWrap: true,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 14,
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        );
+                                  return Material(
+                                    color: Colors.transparent,
+                                    child: InkWell(
+                                      onTap: _showLocationPickerBottomSheet,
+                                      borderRadius: BorderRadius.circular(4),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(vertical: 2),
+                                        child: clickableContent,
                                       ),
                                     ),
-                                ],
-                              );
-                            },
-                          ),
-                        ],
+                                  );
+                                }
+                                return content;
+                              },
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -2404,17 +2525,16 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     };
 
     try {
-      // Try to use nearest location from app controller as default selection
+      // Use admin-selected location override if set, otherwise nearest location from app controller
       final container = ProviderScope.containerOf(context, listen: false);
       final appState = container.read(appControllerProvider);
-      final nearest = appState.nearestLocation;
-      if (nearest != null) {
-        entryData['location'] = nearest.id;
+      final effective = _locationOverride ?? appState.nearestLocation;
+      if (effective != null) {
+        entryData['location'] = effective.id;
         entryData['locationRef'] = FirebaseFirestore.instance
             .collection('locations')
-            .doc(nearest.id);
-        // Optionally add address for display convenience
-        entryData['locationAddress'] = nearest.address;
+            .doc(effective.id);
+        entryData['locationAddress'] = effective.address;
       }
     } catch (_) {}
 

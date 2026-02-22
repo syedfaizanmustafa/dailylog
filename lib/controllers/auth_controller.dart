@@ -8,6 +8,18 @@ final authControllerProvider =
       return AuthController();
     });
 
+/// Current user's role from Firestore ('admin' or 'user'). Use to show admin-only UI.
+final currentUserRoleProvider = FutureProvider<String>((ref) async {
+  final user = ref.watch(authControllerProvider).valueOrNull;
+  if (user == null) return 'user';
+  final doc = await FirebaseFirestore.instance
+      .collection('users')
+      .doc(user.uid)
+      .get();
+  final data = doc.data();
+  return data?['role'] as String? ?? 'user';
+});
+
 class AuthController extends StateNotifier<AsyncValue<User?>> {
   AuthController() : super(const AsyncValue.loading()) {
     _init();

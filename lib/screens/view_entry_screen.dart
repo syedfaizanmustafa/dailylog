@@ -50,6 +50,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   late List<List<String>> _currentGridData;
   final ScrollController _horizontalController = ScrollController();
 
+  /// Total width for header and grid (same as New Entry) so header and table align.
+  double get _totalGridWidth =>
+      4 * (colWidth * 4 + paidColWidth) + signColWidth + 32.0 + colWidth;
+
   // Map to store grid data for each sheet
   final Map<int, List<List<String>>> _sheetsGridData = {};
 
@@ -366,14 +370,23 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       final reference = _entryData!['reference'] as String? ?? 'N/A';
       final serialNumber = _entryData!['serialNumber'] as String? ?? 'N/A';
 
-      // Generate PDF for each sheet
+      // Same content as scroll view: static details (LOG SHEET + legends) + grid only; fit to page preserving aspect ratio
+      final locationAddress = _entryData!['locationAddress'] as String?;
+      final locationIdOrName = _entryData!['location'] as String? ?? '';
+      final address = (locationAddress != null && locationAddress.isNotEmpty)
+          ? locationAddress
+          : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
+      final formattedDate = DateFormat('MM/dd/yyyy').format(entryDate);
+      const double pdfCellWidth = 32.0;
+      const double pdfPaidCellWidth = 40.0;
+      const double pdfSignCellWidth = 100.0;
+      final double pdfContentWidth = 20 * pdfCellWidth + 4 * pdfPaidCellWidth + pdfSignCellWidth;
+
       for (final sheetEntry in _sheetsGridData.entries) {
         final sheetNumber = sheetEntry.key;
         final gridData = sheetEntry.value;
-        
-        // Pre-render all signatures to images for this sheet
+
         final signatureImages = <String, pw.ImageProvider?>{};
-        const double signCellWidth = 100.0;
         const double signCellHeight = 20.0;
 
         for (int row = 0; row < rowCount; row++) {
@@ -382,31 +395,28 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
           if (signaturePoints != null && signaturePoints.isNotEmpty) {
             final imageProvider = await _signaturePointsToPdfImage(
               signaturePoints,
-              signCellWidth - 4,
+              pdfSignCellWidth - 4,
               signCellHeight - 4,
               pdf,
             );
             signatureImages[signatureKey] = imageProvider;
           }
         }
-        
+
         pdf.addPage(
           pw.Page(
             pageFormat: PdfPageFormat.a4.landscape,
             margin: const pw.EdgeInsets.all(10),
             build: (pw.Context context) {
               return pw.FittedBox(
-                fit: pw.BoxFit.scaleDown,
+                fit: pw.BoxFit.contain,
                 alignment: pw.Alignment.topLeft,
                 child: pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   mainAxisSize: pw.MainAxisSize.min,
                   children: [
-                    // Header section
-                    _buildPDFHeader(location, entryDate, isApproved, reference, serialNumber, sheetNumber),
+                    _buildPDFStaticDetails(pdfContentWidth, reference, address, formattedDate),
                     pw.SizedBox(height: 5),
-                    
-                    // Grid section
                     _buildPDFGrid(gridData, sheetNumber, signatureImages),
                   ],
                 ),
@@ -456,97 +466,106 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     }
   }
 
-  pw.Widget _buildPDFHeader(
-    String location,
-    DateTime entryDate,
-    bool isApproved,
-    String reference,
-    String serialNumber,
-    int sheetNumber,
-  ) {
-    return pw.Container(
-      padding: const pw.EdgeInsets.all(16),
-      // No border - removed border decoration
-      child: pw.Column(
+  /// PDF version of the scroll-view header: LOG SHEET block, BASIC LEGEND, OTHER COMMODITIES + DATE (same layout as on screen).
+  pw.Widget _buildPDFStaticDetails(double contentWidth, String reference, String address, String formattedDate) {
+    final w1 = contentWidth * (2 / 11);
+    final w2 = contentWidth * (3 / 11);
+    final w3 = contentWidth * (6 / 11);
+    const double greyBarWidthFactor = 0.75;
+    const double leftPaddingUnderLabel = 5;
+    return pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 8),
+      child: pw.Row(
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: [
-          // First row: Location and Date only (no approval badge)
-          pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Text(
-                'Location: $location',
-                style: pw.TextStyle(
-                  fontSize: 14,
-                  fontWeight: pw.FontWeight.bold,
-                  color: PdfColors.blue700,
-                ),
-              ),
-              pw.SizedBox(height: 4),
-              pw.Text(
-                'Date: ${DateFormat('MM/dd/yyyy').format(entryDate)}',
-                style: const pw.TextStyle(fontSize: 12),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 12),
-          // Details row with reference/serial on left, sheet/created at extreme right
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Text(
-                    'Reference: $reference',
-                    style: pw.TextStyle(
-                      fontSize: 12,
-                      fontWeight: pw.FontWeight.normal,
+          pw.SizedBox(
+            width: w1,
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              mainAxisSize: pw.MainAxisSize.min,
+              children: [
+                pw.Text('LOG SHEET', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10)),
+                pw.SizedBox(height: 4),
+                pw.Row(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      mainAxisSize: pw.MainAxisSize.min,
+                      children: [
+                        pw.Text('CERTIFICATION #', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7)),
+                        pw.Text('RECYCLER NAME', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7)),
+                        pw.Text('ADDRESS', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7)),
+                      ],
                     ),
-                  ),
-                  pw.SizedBox(height: 4),
-                  pw.Text(
-                    'Serial Number: $serialNumber',
-                    style: pw.TextStyle(
-                      fontSize: 12,
-                      fontWeight: pw.FontWeight.normal,
-                    ),
-                  ),
-                ],
-              ),
-              pw.SizedBox(width: 20), // Spacer to push content to extreme right
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.end,
-                children: [
-                  pw.Text(
-                    'Sheet $sheetNumber of ${_sheetsGridData.length}',
-                    style: pw.TextStyle(
-                      fontSize: 12,
-                      fontWeight: pw.FontWeight.normal,
-                      color: PdfColors.grey700,
-                    ),
-                  ),
-                  if (_createdAt != null) ...[
-                    pw.SizedBox(height: 4),
-                    pw.Text(
-                      'Created: ${DateFormat('MM/dd/yyyy HH:mm').format(_createdAt!)}',
-                      style: pw.TextStyle(
-                        fontSize: 10,
-                        color: PdfColors.grey600,
+                    pw.SizedBox(width: 4),
+                    pw.Expanded(
+                      child: pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        mainAxisSize: pw.MainAxisSize.min,
+                        children: [
+                          pw.Padding(padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel), child: pw.Text(reference, style: const pw.TextStyle(fontSize: 7))),
+                          pw.Padding(padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel), child: pw.Text('Camacho RECYCLING', style: const pw.TextStyle(fontSize: 7))),
+                          pw.Padding(padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel), child: pw.Text(address.length > 40 ? '${address.substring(0, 40)}...' : address, style: const pw.TextStyle(fontSize: 7), maxLines: 2)),
+                        ],
                       ),
                     ),
                   ],
-                ],
-              ),
-            ],
-          ),
-          if (_userEmail != null) ...[
-            pw.SizedBox(height: 4),
-            pw.Text(
-              'Email: $_userEmail',
-              style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+                ),
+              ],
             ),
-          ],
+          ),
+          pw.SizedBox(
+            width: w2,
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              mainAxisSize: pw.MainAxisSize.min,
+              children: [
+                pw.Container(
+                  width: w2 * greyBarWidthFactor,
+                  padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+                  color: PdfColors.grey300,
+                  child: pw.Text('BASIC LEGEND', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7)),
+                ),
+                pw.SizedBox(height: 1),
+                pw.Padding(padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel), child: pw.Text('SW   SEGREGATED BY WEIGHT', style: const pw.TextStyle(fontSize: 6))),
+                pw.Padding(padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel), child: pw.Text('SC   SEGREGATE BY COUNT', style: const pw.TextStyle(fontSize: 6))),
+                pw.Padding(padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel), child: pw.Text('C    COMMINGLED (MIX CRV/NON-CRV)', style: const pw.TextStyle(fontSize: 6))),
+                pw.Padding(padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel), child: pw.Text('SP   SCRAP ONLY (NON-CRV)', style: const pw.TextStyle(fontSize: 6))),
+              ],
+            ),
+          ),
+          pw.SizedBox(
+            width: w3,
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              mainAxisSize: pw.MainAxisSize.min,
+              children: [
+                pw.Container(
+                  width: w3 * greyBarWidthFactor,
+                  padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+                  color: PdfColors.grey300,
+                  child: pw.Text('OTHER COMMODITIES LEGEND', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7)),
+                ),
+                pw.SizedBox(height: 2),
+                pw.Padding(
+                  padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel),
+                  child: pw.Text('B1 BIMETAL  P#2 HDPE  P#3 PVC  P#4 LDPE  P#5 PP  P#6 PS  P#7 Other', style: const pw.TextStyle(fontSize: 5)),
+                ),
+                pw.SizedBox(height: 2),
+                pw.Padding(
+                  padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel),
+                  child: pw.Row(
+                    mainAxisSize: pw.MainAxisSize.min,
+                    children: [
+                      pw.Text('DATE: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 7)),
+                      pw.Text(formattedDate, style: const pw.TextStyle(fontSize: 7)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -1272,76 +1291,120 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
           children: [
             // Entry info header
             if (_entryData != null)
-              Container(
-                padding: const EdgeInsets.all(16),
-                margin: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
+              Builder(
+                builder: (context) {
+                  final isApproved = _entryData?['approved'] == true;
+                  return Container(
+                    padding: const EdgeInsets.all(16),
+                    margin: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.05),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Entry ID: ${widget.entryId.substring(0, 8)}...',
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(fontWeight: FontWeight.w500),
+                    child: Row(
+                      children: [
+                        // Left: Entry ID, Created Date, Sheet count in a column
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Entry ID: ${widget.entryId.length > 8 ? '${widget.entryId.substring(0, 8)}...' : widget.entryId}',
+                                style: Theme.of(context).textTheme.bodyMedium
+                                    ?.copyWith(fontWeight: FontWeight.w500),
+                              ),
+                              if (_createdAt != null) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Created: ${DateFormat('MM/dd/yyyy HH:mm').format(_createdAt!)}',
+                                  style: Theme.of(context).textTheme.bodySmall
+                                      ?.copyWith(color: Colors.grey[600]),
+                                ),
+                              ],
+                              const SizedBox(height: 4),
+                              Text(
+                                'Sheets: ${_sheetsGridData.length}',
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(color: Colors.grey[600]),
+                              ),
+                            ],
                           ),
-                          if (_createdAt != null)
-                            Text(
-                              'Created: ${DateFormat('MM/dd/yyyy HH:mm').format(_createdAt!)}',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: Colors.grey[600]),
+                        ),
+                        // Right: Pending tag and Approve button
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: isApproved ? Colors.green[100] : Colors.orange[100],
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: isApproved ? Colors.green : Colors.orange,
+                                  width: 1,
+                                ),
+                              ),
+                              child: Text(
+                                isApproved ? 'APPROVED' : 'PENDING',
+                                style: TextStyle(
+                                  color: isApproved ? Colors.green[800] : Colors.orange[800],
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
                             ),
-                        ],
-                      ),
+                            if (!isApproved) ...[
+                              const SizedBox(height: 8),
+                              ElevatedButton.icon(
+                                onPressed: () => _approveEntry(),
+                                icon: const Icon(Icons.check, size: 16),
+                                label: const Text('Approve'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.green,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  minimumSize: Size.zero,
+                                  textStyle: const TextStyle(fontSize: 12),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
                     ),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            'Sheets: ${_sheetsGridData.length}',
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(fontWeight: FontWeight.w500),
-                          ),
-                          if (_userEmail != null)
-                            Text(
-                              _userEmail!,
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: Colors.grey[600]),
-                              textAlign: TextAlign.end,
-                            ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+                  );
+                },
               ),
 
-            // Main scrollable content area
+            // Main scrollable content area - header and grid in same horizontal scroll (like New Entry)
             Expanded(
               child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildStaticDetails(),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      controller: _horizontalController,
-                      child: _buildGrid(),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  controller: _horizontalController,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _buildStaticDetails(),
+                          _buildGrid(),
+                        ],
+                      ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -1448,151 +1511,240 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   }
 
   Widget _buildStaticDetails() {
-    final entryDate = _entryData?['entryDate'] != null 
+    final entryDate = _entryData?['entryDate'] != null
         ? DateTime.parse(_entryData!['entryDate'])
         : DateTime.now();
-    final location = _entryData?['location'] as String? ?? 'Unknown Location';
-    final isApproved = _entryData?['approved'] == true;
+    final formattedDate = DateFormat('MM/dd/yyyy').format(entryDate);
     final reference = _entryData?['reference'] as String? ?? 'N/A';
-    final serialNumber = _entryData?['serialNumber'] as String? ?? 'N/A';
-    
-    return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header row with location and approval status
-          Row(
+    final locationAddress = _entryData?['locationAddress'] as String?;
+    final locationIdOrName = _entryData?['location'] as String? ?? '';
+    final address = (locationAddress != null && locationAddress.isNotEmpty)
+        ? locationAddress
+        : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
+
+    return SizedBox(
+      width: _totalGridWidth,
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 16.0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Location: $location',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                        color: Theme.of(context).colorScheme.primary,
+              // LOG SHEET DETAILS (far left) - same layout as New Entry
+            Expanded(
+              flex: 2,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'LOG SHEET',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'CERTIFICATION #',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                          Text(
+                            'RECYCLER NAME',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                          Text(
+                            'ADDRESS',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Date: ${DateFormat('MM/dd/yyyy').format(entryDate)}',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  ],
-                ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              reference,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w500,
+                                fontSize: 14,
+                              ),
+                            ),
+                            Text(
+                              'Camacho RECYCLING',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w500,
+                                fontSize: 14,
+                              ),
+                            ),
+                            Text(
+                              address.replaceAll('\n', ' '),
+                              softWrap: true,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w500,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+            ),
+            // BASIC LEGEND - same as New Entry
+            Expanded(
+              flex: 3,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: isApproved ? Colors.green[100] : Colors.orange[100],
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: isApproved ? Colors.green : Colors.orange,
-                        width: 1,
-                      ),
-                    ),
+                    width: double.infinity,
+                    alignment: Alignment.centerLeft,
+                    color: Colors.grey[300],
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                     child: Text(
-                      isApproved ? 'APPROVED' : 'PENDING',
+                      'BASIC LEGEND',
                       style: TextStyle(
-                        color: isApproved ? Colors.green[800] : Colors.orange[800],
                         fontWeight: FontWeight.bold,
-                        fontSize: 12,
+                        fontSize: 14,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  if (!isApproved)
-                    ElevatedButton.icon(
-                      onPressed: () => _approveEntry(),
-                      icon: const Icon(Icons.check, size: 16),
-                      label: const Text('Approve'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        minimumSize: Size.zero,
-                        textStyle: const TextStyle(fontSize: 12),
-                      ),
-                    ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'SW   SEGREGATED BY WEIGHT',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'SC   SEGREGATE BY COUNT',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'C    COMMINGLED 9MIXOF CRV AND NONCRV CONTAINERS',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'SP   SCRAP ONLY (NON-CRV MATERIALS)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
                 ],
               ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // Details row with reference and serial number
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Reference: $reference',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Serial Number: $serialNumber',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+            ),
+            // OTHER COMMODITIES LEGEND + DATE (read-only) - same as New Entry
+            Expanded(
+              flex: 6,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Sheet $_currentSheetNumber of ${_sheetsGridData.length}',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w500,
-                      color: Theme.of(context).colorScheme.secondary,
-                    ),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Container(
+                          alignment: Alignment.centerLeft,
+                          color: Colors.grey[300],
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 2,
+                          ),
+                          child: Text(
+                            'OTHER COMMODITIES LEGEND',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 24),
+                      Text(
+                        'DATE:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        flex: 2,
+                        child: Text(
+                          formattedDate,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
                   Text(
-                    'Created: ${DateFormat('MM/dd/yyyy HH:mm').format(_createdAt ?? DateTime.now())}',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Colors.grey[600],
-                    ),
+                    'B1   BIMETAL',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'P#2  HDPE (High Density Polyethylene)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'P#3  PVC (Vinyl)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'P#4  LDPE (Low Density Polyethylene)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'P#5  PP (Polypropylene)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'P#6  PS (Polystyrene)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'P#7  Other (Includes multilayer and unspecified resins)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
                   ),
                 ],
               ),
-            ],
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
+    ),
     );
   }
 
   Widget _buildGrid() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      controller: _horizontalController,
-      child: Column(
-        children: [
-          // Section headers (top row)
-          Row(
+    return SizedBox(
+      width: _totalGridWidth,
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Section headers (top row)
+            Row(
             children: [
               for (int i = 0; i < 4; i++)
                 Container(
@@ -2772,6 +2924,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
             },
           ),
         ],
+      ),
       ),
     );
   }

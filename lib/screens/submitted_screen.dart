@@ -46,47 +46,43 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
         final sheets = data['sheets'] as Map<String, dynamic>? ?? {};
         final sheetCount = sheets.length;
 
-        // Calculate total amount and section breakdowns from sheets data
+        // Total $ from Total Paid columns; per-material totals from SW (weight) columns
         double totalAmount = 0.0;
         double aluminiumTotal = 0.0;
         double glassTotal = 0.0;
         double petePlasticTotal = 0.0;
         double otherCommoditiesTotal = 0.0;
-        
+
+        double parseCellValue(String value) {
+          if (value.isEmpty) return 0.0;
+          if (value.contains('/')) {
+            final parts = value.split('/');
+            if (parts.length == 2) {
+              final a = double.tryParse(parts[0].trim()) ?? 0.0;
+              final b = double.tryParse(parts[1].trim()) ?? 0.0;
+              return a + b;
+            }
+          }
+          return double.tryParse(value.trim()) ?? 0.0;
+        }
+
         for (final sheet in sheets.values) {
           final sheetData = sheet['data'] as Map<String, dynamic>?;
           if (sheetData != null) {
             final values = sheetData['values'] as List<dynamic>? ?? [];
-            // Calculate section totals from TOTAL PAID columns
-            for (int i = 0; i < values.length; i++) {
-              final row = i ~/ 21;
-              final col = i % 21;
-              final value = values[i].toString();
-              
-              if (value.isNotEmpty) {
-                try {
-                  final numValue = double.parse(value);
-                  
-                  if (col == 4) {
-                    // Aluminium Total Paid
-                    aluminiumTotal += numValue;
-                    totalAmount += numValue;
-                  } else if (col == 9) {
-                    // Glass Total Paid
-                    glassTotal += numValue;
-                    totalAmount += numValue;
-                  } else if (col == 14) {
-                    // Pete Plastic Total Paid
-                    petePlasticTotal += numValue;
-                    totalAmount += numValue;
-                  } else if (col == 19) {
-                    // Other Commodities Total Paid
-                    otherCommoditiesTotal += numValue;
-                    totalAmount += numValue;
-                  }
-                } catch (e) {
-                  // Skip invalid numbers
-                }
+            final cols = sheetData['columns'] as int? ?? 21;
+            final rowCount = cols == 0 ? 0 : (values.length / cols).floor();
+            for (int row = 0; row < 15 && row < rowCount; row++) {
+              for (int col = 0; col < cols; col++) {
+                final index = row * cols + col;
+                if (index >= values.length) continue;
+                final value = values[index].toString();
+                final numVal = parseCellValue(value);
+                if (col == 0) aluminiumTotal += numVal;
+                else if (col == 5) glassTotal += numVal;
+                else if (col == 10) petePlasticTotal += numVal;
+                else if (col == 16) otherCommoditiesTotal += numVal;
+                else if (col == 4 || col == 9 || col == 14 || col == 19) totalAmount += numVal;
               }
             }
           }
@@ -121,7 +117,7 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
     }
   }
 
-  Widget _buildSectionItem(String label, double amount, Color color) {
+  Widget _buildSectionItem(String label, double weight, Color color) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -134,7 +130,7 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
         ),
         const SizedBox(height: 2),
         Text(
-          '\$${amount.toStringAsFixed(2)}',
+          '${weight.toStringAsFixed(2)} lb',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
             fontWeight: FontWeight.w600,
             color: color,
@@ -324,7 +320,7 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
                                           Text(
-                                            'Total Paid Breakdown',
+                                            'Total Weight (SW) by Material',
                                             style: Theme.of(context)
                                                 .textTheme
                                                 .bodySmall
