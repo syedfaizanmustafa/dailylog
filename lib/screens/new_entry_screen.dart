@@ -12,6 +12,7 @@ import '../controllers/auth_controller.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:signature/signature.dart';
+import '../widgets/logout_confirmation_sheet.dart';
 
 class _TwoDimensionalScrollBehavior extends MaterialScrollBehavior {
   const _TwoDimensionalScrollBehavior();
@@ -3092,20 +3093,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
-            onPressed: () async {
-              try {
-                await ref.read(authControllerProvider.notifier).signOut();
-                if (mounted) {
-                  context.go('/');
-                }
-              } catch (e) {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error signing out: $e')),
-                  );
-                }
-              }
-            },
+            onPressed: () => showLogoutConfirmationBottomSheet(context, ref),
           ),
         ],
       ),
@@ -3438,7 +3426,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                                   if (mounted) {
                                     final role = await ref.read(currentUserRoleProvider.future);
                                     if (!mounted) return;
-                                    context.go(role == 'admin' ? '/admin' : '/submitted');
+                                    context.go(role == 'admin' ? '/admin' : '/home');
                                   }
                                 } catch (e) {
                                   print('Error submitting entry: $e');

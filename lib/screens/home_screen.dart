@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../controllers/auth_controller.dart';
+import '../widgets/logout_confirmation_sheet.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -27,20 +28,7 @@ class HomeScreen extends ConsumerWidget {
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Logout',
-            onPressed: () async {
-              try {
-                await ref.read(authControllerProvider.notifier).signOut();
-                if (context.mounted) {
-                  context.go('/');
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Error signing out: $e')),
-                  );
-                }
-              }
-            },
+            onPressed: () => showLogoutConfirmationBottomSheet(context, ref),
           ),
         ],
       ),
@@ -115,17 +103,17 @@ class HomeScreen extends ConsumerWidget {
 
                     const SizedBox(height: 20),
 
-                    // View Submitted Card
-                    _buildActionCard(
-                      context: context,
-                      title: 'View Submitted',
-                      subtitle: 'Review your submitted entries',
-                      icon: Icons.list_alt,
-                      color: Theme.of(context).colorScheme.secondary,
-                      onTap: () => context.go('/submitted'),
-                    ),
+                    // View Submitted Card — hidden for regular users (navigate home after submit instead)
+                    // _buildActionCard(
+                    //   context: context,
+                    //   title: 'View Submitted',
+                    //   subtitle: 'Review your submitted entries',
+                    //   icon: Icons.list_alt,
+                    //   color: Theme.of(context).colorScheme.secondary,
+                    //   onTap: () => context.go('/submitted'),
+                    // ),
 
-                    const SizedBox(height: 20),
+                    // const SizedBox(height: 20),
 
                     // Quick Stats Card (optional)
                     _buildStatsCard(context),

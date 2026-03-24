@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import '../controllers/app_controller.dart';
-import '../controllers/auth_controller.dart';
+import '../widgets/logout_confirmation_sheet.dart';
 
 /// One day's sheet counts by location for the chart.
 class ChartDayData {
@@ -123,12 +123,7 @@ class AdminScreen extends ConsumerWidget {
             child: IconButton.filledTonal(
               icon: const Icon(Icons.logout_rounded),
               tooltip: 'Sign out',
-              onPressed: () async {
-                await ref.read(authControllerProvider.notifier).signOut();
-                if (context.mounted) {
-                  context.go('/');
-                }
-              },
+              onPressed: () => showLogoutConfirmationBottomSheet(context, ref),
             ),
           ),
         ],
