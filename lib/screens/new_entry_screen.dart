@@ -3435,9 +3435,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                                     const Duration(milliseconds: 500),
                                   );
 
-                                  // Navigate to submitted screen
                                   if (mounted) {
-                                    context.go('/submitted');
+                                    final role = await ref.read(currentUserRoleProvider.future);
+                                    if (!mounted) return;
+                                    context.go(role == 'admin' ? '/admin' : '/submitted');
                                   }
                                 } catch (e) {
                                   print('Error submitting entry: $e');
