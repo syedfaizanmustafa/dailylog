@@ -14,6 +14,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
   final _latController = TextEditingController();
   final _lngController = TextEditingController();
   final _addressController = TextEditingController();
+  final _certificationController = TextEditingController();
   String? _editingLocationId;
 
   @override
@@ -22,6 +23,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
     _latController.dispose();
     _lngController.dispose();
     _addressController.dispose();
+    _certificationController.dispose();
     super.dispose();
   }
 
@@ -31,11 +33,12 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
       final lat = double.tryParse(_latController.text.trim());
       final lng = double.tryParse(_lngController.text.trim());
       final address = _addressController.text.trim();
+      final certification = _certificationController.text.trim();
 
-      if (name.isEmpty || lat == null || lng == null) {
+      if (name.isEmpty || lat == null || lng == null || certification.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Name, latitude, and longitude are required')),
+            const SnackBar(content: Text('Name, latitude, longitude, and certification # are required')),
           );
         }
         return;
@@ -45,6 +48,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
         'name': name,
         'coordinates': {'lat': lat, 'lng': lng},
         'address': address,
+        'certification': certification,
         'updatedAt': FieldValue.serverTimestamp(),
         'createdAt': FieldValue.serverTimestamp(),
       };
@@ -60,6 +64,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
         _latController.clear();
         _lngController.clear();
         _addressController.clear();
+        _certificationController.clear();
         _editingLocationId = null;
         Navigator.of(context).pop(); // Close the bottom sheet
         ScaffoldMessenger.of(context).showSnackBar(
@@ -92,6 +97,57 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
     }
   }
 
+  void _showDeleteConfirmationBottomSheet(String id, String locationName) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Delete location?',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Are you sure you want to delete "$locationName"? This cannot be undone.',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        _deleteLocation(id);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                      ),
+                      child: const Text('Delete'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   void _showLocationBottomSheet({String? locationId, Map<String, dynamic>? locationData}) {
     _editingLocationId = locationId;
     
@@ -101,11 +157,13 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
       _latController.text = locationData['coordinates']?['lat']?.toString() ?? '';
       _lngController.text = locationData['coordinates']?['lng']?.toString() ?? '';
       _addressController.text = locationData['address']?.toString() ?? '';
+      _certificationController.text = locationData['certification']?.toString() ?? '';
     } else {
       _nameController.clear();
       _latController.clear();
       _lngController.clear();
       _addressController.clear();
+      _certificationController.clear();
     }
 
     showModalBottomSheet(
@@ -120,59 +178,68 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
         child: Container(
           margin: const EdgeInsets.only(bottom: 16),
           padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                locationId != null ? 'Edit Location' : 'Add New Location',
-                style: Theme.of(context).textTheme.headlineSmall,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              TextField(
-                controller: _nameController,
-                decoration: const InputDecoration(
-                  labelText: 'Location name',
-                  border: OutlineInputBorder(),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  locationId != null ? 'Edit Location' : 'Add New Location',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                  textAlign: TextAlign.center,
                 ),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _latController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                      decoration: const InputDecoration(
-                        labelText: 'Latitude',
-                        border: OutlineInputBorder(),
+                const SizedBox(height: 24),
+                TextField(
+                  controller: _nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Location name',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _latController,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                        decoration: const InputDecoration(
+                          labelText: 'Latitude',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: TextField(
-                      controller: _lngController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                      decoration: const InputDecoration(
-                        labelText: 'Longitude',
-                        border: OutlineInputBorder(),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: TextField(
+                        controller: _lngController,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                        decoration: const InputDecoration(
+                          labelText: 'Longitude',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _addressController,
-                decoration: const InputDecoration(
-                  labelText: 'Address (optional)',
-                  border: OutlineInputBorder(),
+                  ],
                 ),
-              ),
-              const SizedBox(height: 24),
-              Row(
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _addressController,
+                  decoration: const InputDecoration(
+                    labelText: 'Address (optional)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _certificationController,
+                  decoration: const InputDecoration(
+                    labelText: 'Certification #',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Row(
                 children: [
                   Expanded(
                     child: ElevatedButton(
@@ -181,6 +248,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
                         _latController.clear();
                         _lngController.clear();
                         _addressController.clear();
+                        _certificationController.clear();
                         _editingLocationId = null;
                         Navigator.of(context).pop();
                       },
@@ -201,6 +269,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
                 ],
               ),
             ],
+          ),
           ),
         ),
       ),
@@ -301,7 +370,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
                               ),
                               IconButton(
                                 icon: const Icon(Icons.delete, color: Colors.red),
-                                onPressed: () => _deleteLocation(doc.id),
+                                onPressed: () => _showDeleteConfirmationBottomSheet(doc.id, name.isNotEmpty ? name : 'this location'),
                               ),
                             ],
                           ),

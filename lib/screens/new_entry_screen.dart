@@ -1039,84 +1039,88 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                       ),
                       SizedBox(width: 8),
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'RC340765.001',
-                              style: TextStyle(
-                                fontWeight: FontWeight.w500,
-                                fontSize: 14,
-                              ),
-                            ),
-                            Text(
-                              'Camacho RECYCLING',
-                              style: TextStyle(
-                                fontWeight: FontWeight.w500,
-                                fontSize: 14,
-                              ),
-                            ),
-                            Consumer(
-                              builder: (context, ref, _) {
-                                final appState = ref.watch(appControllerProvider);
-                                final roleAsync = ref.watch(currentUserRoleProvider);
-                                final effectiveLocation = _locationOverride ?? appState.nearestLocation;
-                                final address = effectiveLocation?.address ?? '';
-
-                                Widget content;
-                                if (address.isEmpty) {
-                                  content = const Text(
-                                    'Detecting location...',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w500,
-                                      fontSize: 14,
-                                    ),
-                                  );
-                                } else {
-                                  content = Text(
-                                    address.replaceAll('\n', ' '),
-                                    softWrap: true,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w500,
-                                      fontSize: 14,
-                                    ),
-                                  );
-                                }
-
-                                final isAdmin = roleAsync.valueOrNull == 'admin';
-                                if (isAdmin) {
-                                  final clickableContent = address.isEmpty
-                                      ? content
-                                      : Text(
-                                          address.replaceAll('\n', ' '),
-                                          softWrap: true,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 14,
-                                            decoration: TextDecoration.underline,
+                        child: Consumer(
+                          builder: (context, ref, _) {
+                            final appState = ref.watch(appControllerProvider);
+                            final roleAsync = ref.watch(currentUserRoleProvider);
+                            final effectiveLocation = _locationOverride ?? appState.nearestLocation;
+                            final certification = effectiveLocation?.certification ?? '';
+                            final recyclerName = effectiveLocation?.name ?? '';
+                            final address = effectiveLocation?.address ?? '';
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  certification.isNotEmpty ? certification : '—',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w500,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                Text(
+                                  recyclerName.isNotEmpty ? recyclerName : '—',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w500,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                Builder(
+                                  builder: (context) {
+                                    Widget content;
+                                    if (address.isEmpty) {
+                                      content = const Text(
+                                        'Detecting location...',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w500,
+                                          fontSize: 14,
+                                        ),
+                                      );
+                                    } else {
+                                      content = Text(
+                                        address.replaceAll('\n', ' '),
+                                        softWrap: true,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w500,
+                                          fontSize: 14,
+                                        ),
+                                      );
+                                    }
+                                    final isAdmin = roleAsync.valueOrNull == 'admin';
+                                    if (isAdmin) {
+                                      final clickableContent = address.isEmpty
+                                          ? content
+                                          : Text(
+                                              address.replaceAll('\n', ' '),
+                                              softWrap: true,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 14,
+                                                decoration: TextDecoration.underline,
+                                              ),
+                                            );
+                                      return Material(
+                                        color: Colors.transparent,
+                                        child: InkWell(
+                                          onTap: _showLocationPickerBottomSheet,
+                                          borderRadius: BorderRadius.circular(4),
+                                          child: Padding(
+                                            padding: const EdgeInsets.symmetric(vertical: 2),
+                                            child: clickableContent,
                                           ),
-                                        );
-                                  return Material(
-                                    color: Colors.transparent,
-                                    child: InkWell(
-                                      onTap: _showLocationPickerBottomSheet,
-                                      borderRadius: BorderRadius.circular(4),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(vertical: 2),
-                                        child: clickableContent,
-                                      ),
-                                    ),
-                                  );
-                                }
-                                return content;
-                              },
-                            ),
-                          ],
+                                        ),
+                                      );
+                                    }
+                                    return content;
+                                  },
+                                ),
+                              ],
+                            );
+                          },
                         ),
                       ),
                     ],
