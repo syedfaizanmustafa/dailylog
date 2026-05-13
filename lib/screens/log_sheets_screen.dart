@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:go_router/go_router.dart';
 import '../controllers/app_controller.dart';
+import '../utils/sheet_cell_numeric.dart';
 
 class LogSheetsScreen extends ConsumerStatefulWidget {
   const LogSheetsScreen({super.key});
@@ -59,19 +60,8 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         double otherCommoditiesSW = 0.0;
         double totalAmount = 0.0;
         
-        // Helper function to parse cell value (handles dual values like "2/4")
-        double parseCellValue(String value) {
-          if (value.isEmpty) return 0.0;
-          if (value.contains('/')) {
-            final parts = value.split('/');
-            if (parts.length == 2) {
-              final part1 = double.tryParse(parts[0].trim()) ?? 0.0;
-              final part2 = double.tryParse(parts[1].trim()) ?? 0.0;
-              return part1 + part2;
-            }
-          }
-          return double.tryParse(value.trim()) ?? 0.0;
-        }
+        // Helper function to parse cell value (handles dual values like "2/4" or "2,4")
+        double parseCellValue(String value) => parseSheetCellNumericValue(value);
         
         // Loop through all sheets and sum the SW totals from each sheet's totals row
         print('Processing ${sheets.length} sheets for entry ${doc.id}');

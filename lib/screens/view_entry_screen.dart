@@ -13,6 +13,11 @@ import 'package:printing/printing.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 
+import '../utils/log_sheet_cell_label.dart';
+import '../utils/sheet_cell_numeric.dart';
+import '../widgets/dual_numeric_cell_editor.dart';
+import '../widgets/single_numeric_cell_editor.dart';
+
 // Custom signature point class to avoid Point constructor issues
 class SignaturePoint {
   final double dx;
@@ -985,22 +990,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   }
 
   // Helper method to parse a cell value and return its numeric value
-  double _parseCellValue(String value) {
-    if (value.isEmpty) return 0.0;
-
-    // Handle dual values like "2/4" - calculate as 2 + 4 = 6
-    if (value.contains('/')) {
-      final parts = value.split('/');
-      if (parts.length == 2) {
-        final part1 = double.tryParse(parts[0].trim()) ?? 0.0;
-        final part2 = double.tryParse(parts[1].trim()) ?? 0.0;
-        return part1 + part2;
-      }
-    }
-
-    // Handle single values
-    return double.tryParse(value.trim()) ?? 0.0;
-  }
+  double _parseCellValue(String value) => parseSheetCellNumericValue(value);
 
   // Helper method to get column width for totals row
   double _getColumnWidth(int col) {
@@ -1060,6 +1050,78 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     }
 
     // Handle regular cells
+    final isNumericCell = col != 15;
+    if (isNumericCell) {
+      final editorKey = GlobalKey<SingleNumericCellEditorState>();
+      final initial = _currentGridData[row][col];
+      showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          final maxW = (MediaQuery.sizeOf(dialogContext).width - 32)
+              .clamp(280.0, 480.0);
+          return AlertDialog(
+            insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+            title: Text(logSheetCellTitle(row, col)),
+            content: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxW),
+              child: SingleChildScrollView(
+                child: SingleNumericCellEditor(
+                  key: editorKey,
+                  cellLabel: logSheetCellTitle(row, col),
+                  showHeading: false,
+                  initialValue: initial,
+                  showActions: false,
+                ),
+              ),
+            ),
+            actions: [
+              OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(88, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  textStyle: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(88, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  textStyle: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                onPressed: () {
+                  final st = editorKey.currentState;
+                  if (st == null) return;
+                  if (!st.validate()) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Enter a valid number or leave empty.'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                    return;
+                  }
+                  setState(() {
+                    _currentGridData[row][col] = st.value;
+                  });
+                  Navigator.of(dialogContext).pop();
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      );
+      return;
+    }
+
     final textController = TextEditingController(
       text: _currentGridData[row][col],
     );
@@ -1071,6 +1133,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
             title: Text('Edit Cell (Row ${row + 1}, Col ${col + 1})'),
             content: TextField(
               controller: textController,
+              keyboardType: TextInputType.text,
               autofocus: true,
               decoration: const InputDecoration(
                 labelText: 'Value',
@@ -1103,72 +1166,89 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   }
 
   Future<void> _showDualInputDialog(int row, int col) async {
-    TextEditingController controllerA = TextEditingController();
-    TextEditingController controllerB = TextEditingController();
-
-    // Parse existing value if it's in a/b format
-    String currentValue = _currentGridData[row][col];
-    if (currentValue.contains('/')) {
-      final parts = currentValue.split('/');
-      if (parts.length == 2) {
-        controllerA.text = parts[0].trim();
-        controllerB.text = parts[1].trim();
-      }
-    } else if (currentValue.isNotEmpty) {
-      controllerA.text = currentValue;
-    }
+    final dualKey = GlobalKey<DualNumericCellEditorState>();
+    final currentValue = _currentGridData[row][col];
 
     final result = await showDialog<Map<String, String>>(
       context: context,
       builder: (context) {
+        final maxW = (MediaQuery.sizeOf(context).width - 32).clamp(280.0, 480.0);
         return AlertDialog(
-          title: Text('Enter values for cell [${row + 1}, ${col + 1}] (Long Press Mode)'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: controllerA,
-                keyboardType: TextInputType.number,
-                autofocus: true,
-                decoration: InputDecoration(
-                  hintText: 'Enter value A',
-                  border: OutlineInputBorder(),
-                  labelText: 'Value A',
-                ),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          title: Text(logSheetCellTitle(row, col)),
+          content: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxW),
+            child: SingleChildScrollView(
+              child: DualNumericCellEditor(
+                key: dualKey,
+                cellLabel: logSheetCellTitle(row, col),
+                showHeading: false,
+                initialValue: currentValue,
+                pairDelimiter: '/',
+                longPressPairMode: true,
+                secondFieldOptional: false,
+                showActions: false,
               ),
-              SizedBox(height: 8),
-              TextField(
-                controller: controllerB,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  hintText: 'Enter value B',
-                  border: OutlineInputBorder(),
-                  labelText: 'Value B',
-                ),
-              ),
-            ],
+            ),
           ),
           actions: [
-            TextButton(
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(88, 48),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                textStyle: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               onPressed: () => Navigator.pop(context, null),
-              child: Text('Cancel'),
+              child: const Text('Cancel'),
             ),
-            ElevatedButton(
+            FilledButton(
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(88, 48),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                textStyle: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               onPressed: () {
-                final valueA = controllerA.text.trim();
-                final valueB = controllerB.text.trim();
+                final st = dualKey.currentState;
+                if (st == null) return;
+                if (!st.validate()) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Enter the first number before the second.'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                  return;
+                }
+                final valueA = st.valueA;
+                final valueB = st.valueB;
                 if (valueA.isNotEmpty && valueB.isNotEmpty) {
+                  if (double.tryParse(valueA) == null ||
+                      double.tryParse(valueB) == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Enter valid numbers.'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                    return;
+                  }
                   Navigator.pop(context, {'a': valueA, 'b': valueB});
                 } else {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
+                    const SnackBar(
                       content: Text('Please enter both values'),
                       backgroundColor: Colors.red,
                     ),
                   );
                 }
               },
-              child: Text('Save'),
+              child: const Text('Save'),
             ),
           ],
         );

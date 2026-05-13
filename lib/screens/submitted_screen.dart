@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../controllers/auth_controller.dart';
+import '../utils/sheet_cell_numeric.dart';
 
 class SubmittedScreen extends ConsumerStatefulWidget {
   const SubmittedScreen({super.key});
@@ -53,18 +54,7 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
         double petePlasticTotal = 0.0;
         double otherCommoditiesTotal = 0.0;
 
-        double parseCellValue(String value) {
-          if (value.isEmpty) return 0.0;
-          if (value.contains('/')) {
-            final parts = value.split('/');
-            if (parts.length == 2) {
-              final a = double.tryParse(parts[0].trim()) ?? 0.0;
-              final b = double.tryParse(parts[1].trim()) ?? 0.0;
-              return a + b;
-            }
-          }
-          return double.tryParse(value.trim()) ?? 0.0;
-        }
+        double parseCellValue(String value) => parseSheetCellNumericValue(value);
 
         for (final sheet in sheets.values) {
           final sheetData = sheet['data'] as Map<String, dynamic>?;

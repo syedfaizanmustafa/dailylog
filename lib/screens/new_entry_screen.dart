@@ -12,7 +12,12 @@ import '../controllers/auth_controller.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:signature/signature.dart';
+import '../utils/log_sheet_cell_label.dart';
+import '../utils/sheet_cell_numeric.dart';
+import '../widgets/dual_numeric_cell_editor.dart';
+import '../widgets/floating_confirmation_sheet.dart';
 import '../widgets/logout_confirmation_sheet.dart';
+import '../widgets/single_numeric_cell_editor.dart';
 
 class _TwoDimensionalScrollBehavior extends MaterialScrollBehavior {
   const _TwoDimensionalScrollBehavior();
@@ -54,18 +59,6 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     ['CRV WEIGHT', 'NON-CRV WEIGHT', 'TOTAL PAID', ''],
     ['CRV WEIGHT', 'NON-CRV WEIGHT', 'TOTAL PAID', ''],
     [''],
-  ];
-  final List<String> columnHeaders = [
-    // ALUMINIUM
-    'SW', 'SC', 'C', 'SP', 'ALUMINIUM',
-    // GLASS
-    'SW', 'SC', 'C', 'SP', 'GLASS',
-    // #1 PETE PLASTIC
-    'SW', 'SC', 'C', 'SP', 'PETE',
-    // OTHER COMMODITIES
-    'SW', 'SC', 'C', 'SP', 'CODE',
-    // CUSTOMER SIGN
-    'SIGN/ID',
   ];
   final List<double> columnWidths = [
     // ALUMINIUM
@@ -288,22 +281,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   }
 
   // Helper method to parse a cell value and return its numeric value
-  double _parseCellValue(String value) {
-    if (value.isEmpty) return 0.0;
-
-    // Handle dual values like "2/4" - calculate as 2 + 4 = 6
-    if (value.contains('/')) {
-      final parts = value.split('/');
-      if (parts.length == 2) {
-        final part1 = double.tryParse(parts[0].trim()) ?? 0.0;
-        final part2 = double.tryParse(parts[1].trim()) ?? 0.0;
-        return part1 + part2;
-      }
-    }
-
-    // Handle single values
-    return double.tryParse(value.trim()) ?? 0.0;
-  }
+  double _parseCellValue(String value) => parseSheetCellNumericValue(value);
 
   /// When an SW (weight) cell is updated, auto-fill the corresponding Total Paid
   /// for that material: Aluminum (col 0→4), Glass (col 5→9), Plastic (col 10→14).
@@ -570,40 +548,35 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
         _calculateAndUpdateTotals();
       }
     } else {
-      TextEditingController controller = TextEditingController(text: value);
       String? result = await showModalBottomSheet<String>(
         context: context,
         isScrollControlled: true,
         builder: (context) {
-          return Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(context).viewInsets.bottom,
-              left: 16,
-              right: 16,
-              top: 24,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Enter value for cell [${row + 1}, ${col + 1}]'),
-                SizedBox(height: 12),
-                TextField(
-                  controller: controller,
-                  keyboardType: TextInputType.number,
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    hintText: 'Enter value',
-                    border: OutlineInputBorder(),
-                  ),
-                  onSubmitted: (v) => Navigator.pop(context, v),
+          final mq = MediaQuery.of(context);
+          final hPad = (mq.size.width * 0.04).clamp(12.0, 22.0);
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.only(
+                bottom: mq.viewInsets.bottom,
+                left: hPad,
+                right: hPad,
+                top: 12,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SingleNumericCellEditor(
+                      cellLabel: logSheetCellTitle(row, col),
+                      initialValue: value,
+                      showActions: true,
+                      onCancel: () => Navigator.pop(context),
+                      onSave: (v) => Navigator.pop(context, v),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
                 ),
-                SizedBox(height: 12),
-                ElevatedButton(
-                  onPressed: () => Navigator.pop(context, controller.text),
-                  child: Text('Save'),
-                ),
-                SizedBox(height: 12),
-              ],
+              ),
             ),
           );
         },
@@ -627,91 +600,113 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
     int col,
     String currentValue,
   ) async {
-    TextEditingController controllerA = TextEditingController();
-    TextEditingController controllerB = TextEditingController();
-
-    // Parse existing value if it's in a/b format
-    if (currentValue.contains('/')) {
-      final parts = currentValue.split('/');
-      if (parts.length == 2) {
-        controllerA.text = parts[0].trim();
-        controllerB.text = parts[1].trim();
-      }
-    } else if (currentValue.isNotEmpty) {
-      controllerA.text = currentValue;
-    }
+    final dualKey = GlobalKey<DualNumericCellEditorState>();
 
     final result = await showModalBottomSheet<Map<String, String>>(
       context: context,
       isScrollControlled: true,
       builder: (context) {
-        return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).viewInsets.bottom,
-            left: 16,
-            right: 16,
-            top: 24,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Enter values for cell [${row + 1}, ${col + 1}] (Long Press Mode)',
-              ),
-              SizedBox(height: 12),
-              TextField(
-                controller: controllerA,
-                keyboardType: TextInputType.number,
-                autofocus: true,
-                decoration: InputDecoration(
-                  hintText: 'Enter value A',
-                  border: OutlineInputBorder(),
-                  labelText: 'Value A',
-                ),
-              ),
-              SizedBox(height: 8),
-              TextField(
-                controller: controllerB,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  hintText: 'Enter value B',
-                  border: OutlineInputBorder(),
-                  labelText: 'Value B',
-                ),
-              ),
-              SizedBox(height: 12),
-              Row(
+        final mq = MediaQuery.of(context);
+        final hPad = (mq.size.width * 0.04).clamp(12.0, 22.0);
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(
+              bottom: mq.viewInsets.bottom,
+              left: hPad,
+              right: hPad,
+              top: 12,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () => Navigator.pop(context, null),
-                      child: Text('Cancel'),
-                    ),
+                  DualNumericCellEditor(
+                    key: dualKey,
+                    cellLabel: logSheetCellTitle(row, col),
+                    initialValue: currentValue,
+                    pairDelimiter: '/',
+                    longPressPairMode: true,
+                    secondFieldOptional: false,
+                    showActions: false,
                   ),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        final valueA = controllerA.text.trim();
-                        final valueB = controllerB.text.trim();
-                        if (valueA.isNotEmpty && valueB.isNotEmpty) {
-                          Navigator.pop(context, {'a': valueA, 'b': valueB});
-                        } else {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Please enter both values'),
-                              backgroundColor: Colors.red,
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size(0, 52),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 16,
+                              horizontal: 12,
                             ),
-                          );
-                        }
-                      },
-                      child: Text('Save'),
-                    ),
+                            textStyle: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          onPressed: () => Navigator.pop(context, null),
+                          child: const Text('Cancel'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(0, 52),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 16,
+                              horizontal: 12,
+                            ),
+                            textStyle: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          onPressed: () {
+                            final st = dualKey.currentState;
+                            if (st == null) return;
+                            if (!st.validate()) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Enter the first number before the second.'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                              return;
+                            }
+                            final valueA = st.valueA;
+                            final valueB = st.valueB;
+                            if (valueA.isNotEmpty && valueB.isNotEmpty) {
+                              if (double.tryParse(valueA) == null ||
+                                  double.tryParse(valueB) == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Enter valid numbers.'),
+                                    backgroundColor: Colors.red,
+                                  ),
+                                );
+                                return;
+                              }
+                              Navigator.pop(context, {'a': valueA, 'b': valueB});
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Please enter both values'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            }
+                          },
+                          child: const Text('Save'),
+                        ),
+                      ),
+                    ],
                   ),
+                  const SizedBox(height: 8),
                 ],
               ),
-              SizedBox(height: 12),
-            ],
+            ),
           ),
         );
       },
@@ -3221,6 +3216,16 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                           _isSubmitting
                               ? null
                               : () async {
+                                final confirmed =
+                                    await showFloatingConfirmationBottomSheet(
+                                  context: context,
+                                  title: 'Submit entry?',
+                                  message:
+                                      'Your log sheet will be saved to your account. Continue?',
+                                  confirmLabel: 'Submit',
+                                );
+                                if (!confirmed || !mounted) return;
+
                                 setState(() {
                                   _isSubmitting = true;
                                 });
