@@ -407,10 +407,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       final locationName = _entryData!['locationName'] as String?;
       final locationAddress = _entryData!['locationAddress'] as String?;
       final locationIdOrName = _entryData!['location'] as String? ?? '';
-      final locationDisplay = (locationName != null && locationName.isNotEmpty)
-          ? locationName
-          : (locationAddress != null && locationAddress.isNotEmpty)
-              ? locationAddress
+      final locationDisplay = (locationAddress != null && locationAddress.isNotEmpty)
+          ? locationAddress
+          : (locationName != null && locationName.isNotEmpty)
+              ? locationName
               : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
       final formattedDate = DateFormat('MM/dd/yyyy').format(entryDate);
       const double pdfCellWidth = 32.0;
@@ -1635,10 +1635,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     final locationName = _entryData?['locationName'] as String?;
     final locationAddress = _entryData?['locationAddress'] as String?;
     final locationIdOrName = _entryData?['location'] as String? ?? '';
-    final locationDisplay = (locationName != null && locationName.isNotEmpty)
-        ? locationName
-        : (locationAddress != null && locationAddress.isNotEmpty)
-            ? locationAddress
+    final locationDisplay = (locationAddress != null && locationAddress.isNotEmpty)
+        ? locationAddress
+        : (locationName != null && locationName.isNotEmpty)
+            ? locationName
             : (locationIdOrName.isNotEmpty ? locationIdOrName : 'Unknown Location');
 
     return SizedBox(
