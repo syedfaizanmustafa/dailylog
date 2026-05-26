@@ -3003,8 +3003,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   Future<void> _saveSignaturePointsToSubcollection(
     String entryId,
     String sheetNumber,
-    Map<String, List<Point>> signaturePoints,
-  ) async {
+    Map<String, List<Point>> signaturePoints, {
+    required int sourceSheetNumber, // original (pre-remap) sheet number for grid data lookup
+  }) async {
     try {
       print(
         'Saving signature points to subcollection for entry $entryId, sheet $sheetNumber',
@@ -3020,6 +3021,13 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       final serializedPoints = <String, List<Map<String, dynamic>>>{};
       final customerNames = <String, String>{}; // Store customer names
 
+      // Use the ORIGINAL (pre-remap) sheet number to look up the grid data.
+      // sheetNumber is the storage key (may be remapped when merging into an
+      // existing entry), whereas sourceSheetNumber is always the local key that
+      // correctly addresses _sheetsGridData.
+      final sheetGridData =
+          _sheetsGridData[sourceSheetNumber] ?? _currentGridData;
+
       signaturePoints.forEach((key, points) {
         serializedPoints[key] =
             points.map((point) {
@@ -3031,16 +3039,16 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
               };
             }).toList();
 
-        // Extract customer name from grid data if available
+        // Extract customer name from the correct sheet's grid data
         final rowCol = key.split('-');
         if (rowCol.length == 2) {
           final row = int.tryParse(rowCol[0]);
           final col = int.tryParse(rowCol[1]);
           if (row != null &&
               col != null &&
-              row < _currentGridData.length &&
-              col < _currentGridData[row].length) {
-            final cellData = _currentGridData[row][col];
+              row < sheetGridData.length &&
+              col < sheetGridData[row].length) {
+            final cellData = sheetGridData[row][col];
             if (cellData.contains('/') && cellData.contains('Signed')) {
               final parts = cellData.split('/');
               customerNames[key] = parts[0]; // Store the customer name
@@ -3392,6 +3400,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                                           entryRef.id,
                                           newSheetNumber.toString(),
                                           signaturePoints,
+                                          sourceSheetNumber: oldSheetNumber,
                                         );
                                         print(
                                           'Saved signature points for sheet $newSheetNumber (was $oldSheetNumber)',

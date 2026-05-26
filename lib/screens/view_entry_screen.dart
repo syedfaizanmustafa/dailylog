@@ -131,7 +131,12 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       final sheets = _entryData!['sheets'] as Map<String, dynamic>? ?? {};
       print('ViewEntryScreen: Found ${sheets.length} sheets');
 
-      for (final entry in sheets.entries) {
+      // Sort sheet entries by numeric key so sheets are always loaded in
+      // submission order (1, 2, 3 …) regardless of Firestore map iteration order.
+      final sortedSheetEntries = sheets.entries.toList()
+        ..sort((a, b) => int.parse(a.key).compareTo(int.parse(b.key)));
+
+      for (final entry in sortedSheetEntries) {
         final sheetNumber = int.parse(entry.key);
         final sheetData = entry.value as Map<String, dynamic>;
 
@@ -220,9 +225,9 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
         }
       }
 
-      // Initialize the first sheet
+      // Initialize the first sheet (keys are now in sorted/insertion order)
       if (_sheetsGridData.isNotEmpty) {
-        _currentSheetNumber = _sheetsGridData.keys.first;
+        _currentSheetNumber = (_sheetsGridData.keys.toList()..sort()).first;
         _initializeSheet(_currentSheetNumber);
         print('ViewEntryScreen: Initialized sheet $_currentSheetNumber');
       }
@@ -413,7 +418,8 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       const double pdfSignCellWidth = 100.0;
       final double pdfContentWidth = 20 * pdfCellWidth + 4 * pdfPaidCellWidth + pdfSignCellWidth;
 
-      for (final sheetEntry in _sheetsGridData.entries) {
+      for (final sheetEntry in (_sheetsGridData.entries.toList()
+          ..sort((a, b) => a.key.compareTo(b.key)))) {
         final sheetNumber = sheetEntry.key;
         final gridData = sheetEntry.value;
 
@@ -3128,8 +3134,12 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
               };
             }).toList();
         
-        // Get customer name if available
-        final customerName = _sheetsCustomerNames[sheetNumber]?[key];
+        // Get customer name if available.
+        // _sheetsCustomerNames is keyed by int, so parse the String sheetNumber.
+        final sheetNum = int.tryParse(sheetNumber);
+        final customerName = sheetNum != null
+            ? (_sheetsCustomerNames[sheetNum] ?? const {})[key] as String?
+            : null;
         if (customerName != null && customerName.isNotEmpty) {
           customerNames[key] = customerName;
         }
