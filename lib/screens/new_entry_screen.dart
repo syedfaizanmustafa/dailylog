@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../controllers/app_controller.dart';
 import '../controllers/auth_controller.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -225,8 +226,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   @override
   void initState() {
     super.initState();
-    // Initialize the first sheet
+    // Initialize the first sheet, then overwrite with draft if one exists
     _initializeSheet(1);
+    _loadDraftIfExists();
     // Calculate initial totals
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _calculateAndUpdateTotals();
@@ -234,6 +236,153 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       final container = ProviderScope.containerOf(context, listen: false);
       container.read(appControllerProvider.notifier).refreshNearest();
     });
+  }
+
+  // ── Draft persistence ───────────────────────────────────────────────────
+
+  /// Serialize the current sheet state to SharedPreferences.
+  Future<void> _saveDraft() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final sheetsMap = <String, dynamic>{};
+      _sheetsGridData.forEach((sheetNum, rows) {
+        sheetsMap[sheetNum.toString()] = rows;
+      });
+      final draft = <String, dynamic>{
+        'sheetsGridData': sheetsMap,
+        'selectedDate': _selectedDate.toIso8601String(),
+        'currentSheetNumber': _currentSheetNumber,
+        'aluminumMultiplier': _aluminumMultiplier,
+        'glassMultiplier': _glassMultiplier,
+        'plasticMultiplier': _plasticMultiplier,
+      };
+      if (_locationOverride != null) {
+        draft['locationOverride'] = {
+          'id': _locationOverride!.id,
+          'name': _locationOverride!.name,
+          'address': _locationOverride!.address,
+          'certification': _locationOverride!.certification,
+          'latitude': _locationOverride!.latitude,
+          'longitude': _locationOverride!.longitude,
+        };
+      }
+      await prefs.setString(kDraftSheetKey, jsonEncode(draft));
+      ref.invalidate(hasDraftProvider);
+    } catch (e) {
+      print('Error saving draft: $e');
+    }
+  }
+
+  /// Load a previously saved draft from SharedPreferences, if any.
+  Future<void> _loadDraftIfExists() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonStr = prefs.getString(kDraftSheetKey);
+      if (jsonStr == null) return;
+      final draft = jsonDecode(jsonStr) as Map<String, dynamic>;
+
+      final sheetsMapRaw = draft['sheetsGridData'] as Map<String, dynamic>?;
+      if (sheetsMapRaw != null) {
+        sheetsMapRaw.forEach((key, value) {
+          final sheetNum = int.tryParse(key);
+          if (sheetNum != null) {
+            final rows = (value as List)
+                .map((row) =>
+                    (row as List).map((cell) => cell.toString()).toList())
+                .toList();
+            _sheetsGridData[sheetNum] = rows;
+            _sheetsSignatures[sheetNum] = {};
+            _sheetsSignaturePoints[sheetNum] = {};
+          }
+        });
+      }
+
+      if (draft['selectedDate'] != null) {
+        _selectedDate = DateTime.parse(draft['selectedDate'] as String);
+      }
+      if (draft['currentSheetNumber'] != null) {
+        _currentSheetNumber = draft['currentSheetNumber'] as int;
+      }
+      if (draft['aluminumMultiplier'] != null) {
+        _aluminumMultiplier =
+            (draft['aluminumMultiplier'] as num).toDouble();
+      }
+      if (draft['glassMultiplier'] != null) {
+        _glassMultiplier = (draft['glassMultiplier'] as num).toDouble();
+      }
+      if (draft['plasticMultiplier'] != null) {
+        _plasticMultiplier =
+            (draft['plasticMultiplier'] as num).toDouble();
+      }
+      if (draft['locationOverride'] != null) {
+        final loc = draft['locationOverride'] as Map<String, dynamic>;
+        _locationOverride = AppLocation(
+          id: loc['id'] as String,
+          name: loc['name'] as String,
+          address: loc['address'] as String,
+          certification: (loc['certification'] as String?) ?? '',
+          latitude: (loc['latitude'] as num).toDouble(),
+          longitude: (loc['longitude'] as num).toDouble(),
+        );
+      }
+
+      if (mounted) {
+        setState(() {});
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) { if (mounted) _calculateAndUpdateTotals(); },
+        );
+      }
+    } catch (e) {
+      print('Error loading draft: $e');
+    }
+  }
+
+  /// Remove the saved draft from SharedPreferences.
+  Future<void> _clearDraft() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(kDraftSheetKey);
+      ref.invalidate(hasDraftProvider);
+    } catch (e) {
+      print('Error clearing draft: $e');
+    }
+  }
+
+  /// Returns true if at least one user-entered cell is non-empty across all
+  /// sheets. Col 20 is the auto-calculated row "Total Paid" — it is always
+  /// written as "0.00" by [_calculateAndUpdateTotals] even on a blank sheet,
+  /// so it must be excluded from this check.
+  bool _hasAnyData() {
+    for (final gridData in _sheetsGridData.values) {
+      for (int row = 0; row < rowCount; row++) {
+        if (row >= gridData.length) continue;
+        for (int col = 0; col < gridData[row].length; col++) {
+          if (col == 20) continue; // auto-calculated, not user data
+          if (gridData[row][col].isNotEmpty) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Show a confirmation sheet before leaving, save draft on confirm.
+  /// If all sheets are blank, just pops without any confirmation or save.
+  Future<void> _handleBackPress() async {
+    if (!_hasAnyData()) {
+      if (mounted) context.pop();
+      return;
+    }
+    final confirmed = await showFloatingConfirmationBottomSheet(
+      context: context,
+      title: 'Leave entry?',
+      message:
+          'Your progress will be saved as a draft so you can continue later.',
+      confirmLabel: 'Save & exit',
+      cancelLabel: 'Keep editing',
+    );
+    if (!confirmed || !mounted) return;
+    await _saveDraft();
+    if (mounted) context.pop();
   }
 
   void _initializeSheet(int sheetNumber) {
@@ -3084,21 +3233,20 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope<Object?>(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _handleBackPress();
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: const Text('New Entry'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.home),
-            tooltip: 'Home',
-            onPressed: () => context.go('/home'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
-            onPressed: () => showLogoutConfirmationBottomSheet(context, ref),
-          ),
-        ],
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: _handleBackPress,
+        ),
       ),
       body: SafeArea(
         child: ScrollConfiguration(
@@ -3438,6 +3586,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
                                   );
 
                                   if (mounted) {
+                                    await _clearDraft();
                                     final role = await ref.read(currentUserRoleProvider.future);
                                     if (!mounted) return;
                                     context.go(role == 'admin' ? '/admin' : '/home');
@@ -3486,7 +3635,8 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
         ),
       ),
     ),
-    );
+    ),   // child: Scaffold
+    );   // PopScope
   }
 }
 

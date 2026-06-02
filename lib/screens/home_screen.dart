@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../controllers/app_controller.dart';
 import '../controllers/auth_controller.dart';
+import '../widgets/floating_confirmation_sheet.dart';
 import '../widgets/logout_confirmation_sheet.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -10,6 +13,7 @@ class HomeScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final user = ref.watch(authControllerProvider).value;
+    final hasDraft = ref.watch(hasDraftProvider).valueOrNull ?? false;
 
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.background,
@@ -91,15 +95,62 @@ class HomeScreen extends ConsumerWidget {
               Expanded(
                 child: Column(
                   children: [
-                    // New Entry Card
+                    // New Entry / Edit Draft Card
                     _buildActionCard(
                       context: context,
-                      title: 'New Entry',
-                      subtitle: 'Create a new daily log sheet',
-                      icon: Icons.add_circle_outline,
+                      title: hasDraft ? 'Edit Draft' : 'New Entry',
+                      subtitle: hasDraft
+                          ? 'Continue your saved draft'
+                          : 'Create a new daily log sheet',
+                      icon: hasDraft
+                          ? Icons.edit_note
+                          : Icons.add_circle_outline,
                       color: Theme.of(context).colorScheme.primary,
-                      onTap: () => context.go('/new-entry'),
+                      onTap: () => context.push('/new-entry'),
                     ),
+
+                    if (hasDraft) ...[
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton.icon(
+                          onPressed: () async {
+                            final confirmed =
+                                await showFloatingConfirmationBottomSheet(
+                              context: context,
+                              title: 'Delete draft?',
+                              message:
+                                  'This will permanently discard your saved draft.',
+                              confirmLabel: 'Delete',
+                              cancelLabel: 'Cancel',
+                            );
+                            if (!confirmed) return;
+                            final prefs =
+                                await SharedPreferences.getInstance();
+                            await prefs.remove(kDraftSheetKey);
+                            ref.invalidate(hasDraftProvider);
+                          },
+                          icon: Icon(
+                            Icons.delete_outline,
+                            size: 18,
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                          label: Text(
+                            'Delete draft',
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                              fontSize: 13,
+                            ),
+                          ),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
 
                     const SizedBox(height: 20),
 

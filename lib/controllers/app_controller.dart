@@ -2,6 +2,7 @@ import 'dart:math' show cos, sin, sqrt, asin;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class AppLocation {
   final String id;
@@ -209,6 +210,16 @@ class AppController extends StateNotifier<AppState> {
 
 final appControllerProvider = StateNotifierProvider<AppController, AppState>((ref) {
   return AppController();
+});
+
+/// SharedPreferences key where the in-progress sheet draft is stored.
+const String kDraftSheetKey = 'new_entry_draft';
+
+/// Reactive flag: true when a saved draft exists in SharedPreferences.
+/// Call `ref.invalidate(hasDraftProvider)` after saving or clearing a draft.
+final hasDraftProvider = FutureProvider<bool>((ref) async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.containsKey(kDraftSheetKey);
 });
 
 

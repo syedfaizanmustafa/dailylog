@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../controllers/app_controller.dart';
+import '../widgets/floating_confirmation_sheet.dart';
 import '../widgets/logout_confirmation_sheet.dart';
 
 /// One day's sheet counts by location for the chart.
@@ -105,6 +107,7 @@ class AdminScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    final hasDraft = ref.watch(hasDraftProvider).valueOrNull ?? false;
 
     return Scaffold(
       backgroundColor: colorScheme.surface,
@@ -172,12 +175,37 @@ class AdminScreen extends ConsumerWidget {
                 ),
                 _buildOptionTile(
                   context,
-                  title: 'New Entry',
-                  description: 'Create a new daily log entry',
-                  icon: Icons.add_circle_rounded,
+                  title: hasDraft ? 'Edit Draft' : 'New Entry',
+                  description: hasDraft
+                      ? 'Continue your saved draft'
+                      : 'Create a new daily log entry',
+                  icon: hasDraft ? Icons.edit_note : Icons.add_circle_rounded,
                   iconColor: colorScheme.tertiary,
                   onTap: () => context.push('/new-entry'),
                 ),
+                if (hasDraft)
+                  _buildOptionTile(
+                    context,
+                    title: 'Delete Draft',
+                    description: 'Discard the saved draft permanently',
+                    icon: Icons.delete_outline_rounded,
+                    iconColor: colorScheme.error,
+                    onTap: () async {
+                      final confirmed =
+                          await showFloatingConfirmationBottomSheet(
+                        context: context,
+                        title: 'Delete draft?',
+                        message:
+                            'This will permanently discard your saved draft.',
+                        confirmLabel: 'Delete',
+                        cancelLabel: 'Cancel',
+                      );
+                      if (!confirmed) return;
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.remove(kDraftSheetKey);
+                      ref.invalidate(hasDraftProvider);
+                    },
+                  ),
                 _buildOptionTile(
                   context,
                   title: 'Manage Log Sheets',
