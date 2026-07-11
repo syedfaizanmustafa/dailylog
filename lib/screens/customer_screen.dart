@@ -77,7 +77,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
         centerTitle: true,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/new-entry'),
+          onPressed: () => context.pop(),
         ),
         backgroundColor: Colors.transparent,
         elevation: 0,

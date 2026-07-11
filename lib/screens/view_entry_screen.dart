@@ -415,7 +415,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       final formattedDate = DateFormat('MM/dd/yyyy').format(entryDate);
       const double pdfCellWidth = 32.0;
       const double pdfPaidCellWidth = 40.0;
-      const double pdfSignCellWidth = 100.0;
+      const double pdfSignCellWidth = 130.0;
       final double pdfContentWidth = 20 * pdfCellWidth + 4 * pdfPaidCellWidth + pdfSignCellWidth;
 
       for (final sheetEntry in (_sheetsGridData.entries.toList()
@@ -617,9 +617,9 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     const double cellWidth = 32.0;
     const double cellHeight = 20.0;
     const double paidCellWidth = 40.0;
-    const double signCellWidth = 100.0;
+    const double signCellWidth = 130.0; // widened from 100
 
-    return pw.Table(
+    final dataTable = pw.Table(
       border: pw.TableBorder.all(color: PdfColors.black, width: 1),
       columnWidths: {
         0: const pw.FixedColumnWidth(cellWidth), // SW
@@ -777,8 +777,18 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
             ],
           );
         }),
-        // Totals row
-        _buildPDFTotalsRow(gridData, cellWidth, paidCellWidth, signCellWidth, cellHeight),
+      ],
+    );
+
+    // Totals row is built as a separate pw.Row (not a pw.TableRow) so that
+    // the last two columns (Other-paid + Sign) can be merged into one
+    // "GRAND TOTAL" cell without hitting pw.Table's fixed-column limitation.
+    return pw.Column(
+      mainAxisSize: pw.MainAxisSize.min,
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        dataTable,
+        _buildPDFTotalsWidget(gridData, cellWidth, paidCellWidth, signCellWidth, cellHeight),
       ],
     );
   }
@@ -832,6 +842,47 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     final signatureImage = signatureImages[signatureKey];
     final hasSignature = signatureImage != null;
     
+    // Build cell content — mirrors the on-screen Row layout exactly:
+    // name on the left (flex 2), signature on the right (flex 3).
+    pw.Widget cellContent;
+    if (hasSignature && customerName.isNotEmpty) {
+      cellContent = pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.center,
+        children: [
+          pw.Expanded(
+            flex: 2,
+            child: pw.Text(
+              customerName,
+              style: pw.TextStyle(
+                fontSize: 6,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.blue700,
+              ),
+              textAlign: pw.TextAlign.center,
+              maxLines: 1,
+            ),
+          ),
+          pw.Expanded(
+            flex: 3,
+            child: pw.Image(
+              signatureImage!,
+              fit: pw.BoxFit.contain,
+            ),
+          ),
+        ],
+      );
+    } else if (hasSignature) {
+      cellContent = pw.Image(signatureImage!, fit: pw.BoxFit.contain);
+    } else {
+      cellContent = pw.Text(
+        customerName,
+        style: pw.TextStyle(fontSize: 6, color: PdfColors.black),
+        textAlign: pw.TextAlign.center,
+        maxLines: 2,
+        overflow: pw.TextOverflow.clip,
+      );
+    }
+
     return pw.Container(
       width: width,
       height: height,
@@ -839,77 +890,41 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       decoration: const pw.BoxDecoration(color: PdfColors.white),
       child: pw.Padding(
         padding: const pw.EdgeInsets.all(2),
-        child: hasSignature
-            ? pw.Stack(
-                children: [
-                  // Customer name at top if available
-                  if (customerName.isNotEmpty)
-                    pw.Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: pw.Text(
-                        customerName,
-                        style: pw.TextStyle(
-                          fontSize: 6,
-                          fontWeight: pw.FontWeight.bold,
-                          color: PdfColors.blue700,
-                        ),
-                        textAlign: pw.TextAlign.center,
-                        maxLines: 1,
-                      ),
-                    ),
-                  // Signature image
-                  pw.Positioned(
-                    top: customerName.isNotEmpty ? 8 : 0,
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    child: pw.Image(
-                      signatureImage!,
-                      fit: pw.BoxFit.contain,
-                    ),
-                  ),
-                ],
-              )
-            : pw.Text(
-                customerName.isNotEmpty ? customerName : '',
-                style: pw.TextStyle(
-                  fontSize: 6,
-                  color: PdfColors.black,
-                ),
-                textAlign: pw.TextAlign.center,
-                maxLines: 2,
-                overflow: pw.TextOverflow.clip,
-              ),
+        child: cellContent,
       ),
     );
   }
 
-  pw.TableRow _buildPDFTotalsRow(
+  /// Totals row rendered as a [pw.Row] so that the last two columns
+  /// (Other-paid col 20 + Signature col 21) can be merged into a single
+  /// "GRAND TOTAL" cell — matching the on-screen layout exactly.
+  pw.Widget _buildPDFTotalsWidget(
     List<List<String>> gridData,
     double cellWidth,
     double paidCellWidth,
     double signCellWidth,
     double cellHeight,
   ) {
-    // Calculate totals
+    // Grand total = sum of col 20 (per-row "Total Paid") across all rows.
+    // Col 20 already equals col4+col9+col14+col19 per row, so summing it
+    // directly matches the on-screen calculation and avoids double-counting.
+    double grandTotal = 0.0;
+    for (int row = 0; row < rowCount; row++) {
+      if (row < gridData.length) {
+        grandTotal += _parseCellValue(gridData[row][20]);
+      }
+    }
+
+    // Section totals still shown in individual paid-column cells.
     double aluminiumTotal = 0.0;
     double glassTotal = 0.0;
     double peteTotal = 0.0;
-    double otherTotal = 0.0;
-    double grandTotal = 0.0;
-
     for (int row = 0; row < rowCount; row++) {
       aluminiumTotal += _parseCellValue(gridData[row][4]);
       glassTotal += _parseCellValue(gridData[row][9]);
       peteTotal += _parseCellValue(gridData[row][14]);
-      otherTotal += _parseCellValue(gridData[row][20]);
     }
 
-    grandTotal = aluminiumTotal + glassTotal + peteTotal + otherTotal;
-
-    // Calculate individual column totals for display
     final columnTotals = List.generate(20, (col) {
       double total = 0.0;
       for (int row = 0; row < rowCount; row++) {
@@ -920,61 +935,65 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       return total;
     });
 
-    return pw.TableRow(
-      decoration: const pw.BoxDecoration(color: PdfColors.orange50),
+    // Helper: a single bordered cell in the totals row.
+    pw.Widget tc(String text, double width, {bool isGrand = false}) {
+      return pw.Container(
+        width: width,
+        height: cellHeight,
+        alignment: pw.Alignment.center,
+        decoration: pw.BoxDecoration(
+          color: PdfColors.orange50,
+          border: pw.Border.all(color: PdfColors.black, width: 0.75),
+        ),
+        child: pw.Padding(
+          padding: const pw.EdgeInsets.all(1),
+          child: pw.Text(
+            text,
+            style: pw.TextStyle(
+              fontSize: isGrand ? 8 : 7,
+              fontWeight:
+                  isGrand ? pw.FontWeight.bold : pw.FontWeight.normal,
+            ),
+            textAlign: pw.TextAlign.center,
+            maxLines: 2,
+            overflow: pw.TextOverflow.clip,
+          ),
+        ),
+      );
+    }
+
+    return pw.Row(
       children: [
-        // ALUMINIUM section (columns 0-4)
-        _buildPDFCell(columnTotals[0].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[1].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[2].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[3].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(
-          aluminiumTotal.toStringAsFixed(2),
-          paidCellWidth,
-          cellHeight,
-          PdfColors.orange50,
-        ),
-        // GLASS section (columns 5-9)
-        _buildPDFCell(columnTotals[5].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[6].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[7].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[8].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(
-          glassTotal.toStringAsFixed(2),
-          paidCellWidth,
-          cellHeight,
-          PdfColors.orange50,
-        ),
-        // PETE PLASTIC section (columns 10-14)
-        _buildPDFCell(columnTotals[10].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[11].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[12].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[13].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(
-          peteTotal.toStringAsFixed(2),
-          paidCellWidth,
-          cellHeight,
-          PdfColors.orange50,
-        ),
-        // CODE (column 15) - show count
-        _buildPDFCell('', cellWidth, cellHeight, PdfColors.orange50),
-        // OTHER COMMODITIES section (columns 16-20)
-        _buildPDFCell(columnTotals[16].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[17].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[18].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(columnTotals[19].toStringAsFixed(2), cellWidth, cellHeight, PdfColors.orange50),
-        _buildPDFCell(
-          otherTotal.toStringAsFixed(2),
-          paidCellWidth,
-          cellHeight,
-          PdfColors.orange50,
-        ),
-        // SIGN column - show GRAND TOTAL
-        _buildPDFCell(
+        // ALUMINIUM section (cols 0-4)
+        tc(columnTotals[0].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[1].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[2].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[3].toStringAsFixed(2), cellWidth),
+        tc(aluminiumTotal.toStringAsFixed(2), paidCellWidth),
+        // GLASS section (cols 5-9)
+        tc(columnTotals[5].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[6].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[7].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[8].toStringAsFixed(2), cellWidth),
+        tc(glassTotal.toStringAsFixed(2), paidCellWidth),
+        // PETE section (cols 10-14)
+        tc(columnTotals[10].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[11].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[12].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[13].toStringAsFixed(2), cellWidth),
+        tc(peteTotal.toStringAsFixed(2), paidCellWidth),
+        // CODE col 15
+        tc('', cellWidth),
+        // OTHER section (cols 16-19; col 20 is merged into Grand Total)
+        tc(columnTotals[16].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[17].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[18].toStringAsFixed(2), cellWidth),
+        tc(columnTotals[19].toStringAsFixed(2), cellWidth),
+        // MERGED: Grand Total spans col-20 (paidCellWidth) + col-21 (signCellWidth)
+        tc(
           'GRAND TOTAL\n${grandTotal.toStringAsFixed(2)}',
-          signCellWidth,
-          cellHeight,
-          PdfColors.orange50,
+          paidCellWidth + signCellWidth,
+          isGrand: true,
         ),
       ],
     );
@@ -1386,11 +1405,6 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
               tooltip: 'Download PDF',
               onPressed: _generateAndSharePDF,
             ),
-          IconButton(
-            icon: const Icon(Icons.home),
-            tooltip: 'Home',
-            onPressed: () => context.go('/home'),
-          ),
           if (_entryData != null)
             IconButton(
               icon: Icon(_isReadOnly ? Icons.edit : Icons.save),

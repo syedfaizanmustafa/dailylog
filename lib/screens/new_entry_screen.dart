@@ -40,7 +40,8 @@ class NewEntryScreen extends ConsumerStatefulWidget {
   ConsumerState<NewEntryScreen> createState() => _NewEntryScreenState();
 }
 
-class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
+class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
+    with WidgetsBindingObserver {
   final int rowCount = 15;
   static const double colWidth = 80;
   static const double paidColWidth = 80;
@@ -226,6 +227,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
   @override
   void initState() {
     super.initState();
+    // Observe app lifecycle so we can snapshot a draft if the app is
+    // backgrounded or killed mid-edit (not just on back-button exit).
+    WidgetsBinding.instance.addObserver(this);
     // Initialize the first sheet, then overwrite with draft if one exists
     _initializeSheet(1);
     _loadDraftIfExists();
@@ -248,8 +252,27 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       _sheetsGridData.forEach((sheetNum, rows) {
         sheetsMap[sheetNum.toString()] = rows;
       });
+      // Serialize signature strokes so a signed cell survives an app kill.
+      // Includes pressure so the restored Point is a faithful copy.
+      final signaturePointsMap = <String, dynamic>{};
+      _sheetsSignaturePoints.forEach((sheetNum, cellMap) {
+        if (cellMap.isEmpty) return;
+        final cells = <String, dynamic>{};
+        cellMap.forEach((cellKey, points) {
+          cells[cellKey] = points
+              .map((point) => {
+                    'dx': point.offset.dx,
+                    'dy': point.offset.dy,
+                    'type': point.type.index,
+                    'pressure': point.pressure,
+                  })
+              .toList();
+        });
+        signaturePointsMap[sheetNum.toString()] = cells;
+      });
       final draft = <String, dynamic>{
         'sheetsGridData': sheetsMap,
+        'signaturePoints': signaturePointsMap,
         'selectedDate': _selectedDate.toIso8601String(),
         'currentSheetNumber': _currentSheetNumber,
         'aluminumMultiplier': _aluminumMultiplier,
@@ -294,6 +317,38 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
             _sheetsSignatures[sheetNum] = {};
             _sheetsSignaturePoints[sheetNum] = {};
           }
+        });
+      }
+
+      // Restore signature strokes so signed cells re-render (and re-submit)
+      // instead of showing "Signed" with no signature behind it.
+      final signaturePointsRaw =
+          draft['signaturePoints'] as Map<String, dynamic>?;
+      if (signaturePointsRaw != null) {
+        signaturePointsRaw.forEach((sheetKey, cellsRaw) {
+          final sheetNum = int.tryParse(sheetKey);
+          if (sheetNum == null || cellsRaw is! Map<String, dynamic>) return;
+          final cellMap = <String, List<Point>>{};
+          cellsRaw.forEach((cellKey, pointsRaw) {
+            if (pointsRaw is! List) return;
+            cellMap[cellKey] = pointsRaw.map<Point>((p) {
+              final m = p as Map<String, dynamic>;
+              final typeIndex = (m['type'] as num?)?.toInt() ?? 0;
+              final safeType = (typeIndex >= 0 &&
+                      typeIndex < PointType.values.length)
+                  ? typeIndex
+                  : 0;
+              return Point(
+                Offset(
+                  (m['dx'] as num).toDouble(),
+                  (m['dy'] as num).toDouble(),
+                ),
+                PointType.values[safeType],
+                (m['pressure'] as num?)?.toDouble() ?? 1.0,
+              );
+            }).toList();
+          });
+          _sheetsSignaturePoints[sheetNum] = cellMap;
         });
       }
 
@@ -408,7 +463,24 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen> {
       _sheetsSignatures[_currentSheetNumber]!;
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // When the app is about to be backgrounded/suspended, the OS may kill the
+    // process without ever calling dispose(). Snapshot the in-progress sheet
+    // as a draft so nothing is lost. Mirrors the "Save & exit" behaviour and
+    // is safely restored by _loadDraftIfExists() on the next launch.
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      if (_hasAnyData()) {
+        _saveDraft();
+      }
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _horizontalController.dispose();
     super.dispose();
   }
