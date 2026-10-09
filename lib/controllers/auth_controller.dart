@@ -83,6 +83,11 @@ class AuthController extends StateNotifier<AsyncValue<User?>> {
       final userData = userDoc.data() as Map<String, dynamic>;
       print('User data from Firestore: $userData'); // Debug print
 
+      if (userData['disabled'] == true) {
+        await FirebaseAuth.instance.signOut();
+        throw Exception('This account has been disabled');
+      }
+
       final role = userData['role'] as String? ?? 'user';
       print('Assigned role: $role'); // Debug print
 

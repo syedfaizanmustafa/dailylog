@@ -1,0 +1,69 @@
+rules_version = '2';
+
+// Camacho Daily Log — Firestore rules.
+// Staff must be signed in for everything. Receipt delivery results
+// (sid/status/error) are written only by Cloud Functions (admin SDK bypasses rules).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // Staff accounts: a user may read their own record; only admins manage others.
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if signedIn() && request.auth.uid == uid;
+      allow update, delete: if isAdmin();
+      allow list: if isAdmin();
+    }
+
+    // Log sheets (and their signatures/{sheet} subcollection): any signed-in staff member.
+    match /entries/{entryId} {
+      allow read, write: if signedIn();
+      match /{sub=**} {
+        allow read, write: if signedIn();
+      }
+    }
+    match /locations/{locationId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Customer receipts: staff create/read; staff may only change the fields
+    // the app touches (delivery requests, printed flag, ID #, entry link).
+    match /receipts/{receiptId} {
+      allow read, create: if signedIn();
+      // Admins may also reissue a receipt (corrected lines/total, same number
+      // and token) after a log sheet is edited.
+      allow update: if isAdmin() || (signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['sms', 'email', 'printed', 'customerId', 'entryId', 'sheetNumber']));
+      allow delete: if isAdmin();
+    }
+
+    // Sequential receipt counter (transaction from the app).
+    match /counters/{counterId} {
+      allow read, write: if signedIn();
+    }
+
+    // Signatures saved with entries, and the admin log-sheet list.
+    match /signatures/{sigId} {
+      allow read, write: if signedIn();
+    }
+    match /logs/{logId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Legacy connectivity-test collection used by the app on submit.
+    match /test/{docId} {
+      allow read, write: if signedIn();
+    }
+  }
+}

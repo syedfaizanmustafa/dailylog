@@ -1,0 +1,337 @@
+--- lib/screens/new_entry_screen.dart	2026-10-09 19:17:21.052312971 +0500
++++ lib/screens/new_entry_screen.dart	2026-10-09 19:14:28.283766646 +0500
+@@ -21,6 +21,7 @@
+ import '../widgets/logout_confirmation_sheet.dart';
+ import '../widgets/single_numeric_cell_editor.dart';
+ import '../models/receipt.dart';
++import '../models/location_prices.dart';
+ import '../services/receipt_service.dart';
+ import 'receipt_screen.dart';
+ 
+@@ -121,6 +122,161 @@
+   /// Admin-selected location override. When non-null, used instead of nearestLocation for display and submission.
+   AppLocation? _locationOverride;
+ 
++  // ── Prices (set per location by admins in Locations › Prices) ──
++  /// Location whose prices this sheet uses; null = standard prices.
++  String? _pricesFromLocation;
++
++  /// "locationId|signature" of location prices staff chose not to switch to.
++  String? _priceBannerDismissed;
++
++  /// An admin changed a price on this sheet by hand (never overwritten
++  /// automatically after that).
++  bool _pricesEditedHere = false;
++
++  bool _priceSyncScheduled = false;
++
++  LocationPrices get _sheetPrices => LocationPrices(
++        aluminum: _aluminumMultiplier,
++        glass: _glassMultiplier,
++        pete: _plasticMultiplier,
++      );
++
++  /// True once any customer row on any sheet has something typed in it.
++  bool get _sheetsHaveData {
++    for (final grid in _sheetsGridData.values) {
++      for (int r = 0; r < rowCount && r < grid.length; r++) {
++        for (int c = 0; c < grid[r].length && c < 22; c++) {
++          if (c == 20) continue; // auto row total
++          if (grid[r][c].trim().isNotEmpty) return true;
++        }
++      }
++    }
++    return false;
++  }
++
++  /// Switches the sheet to [p]. Only rows typed after this use the new
++  /// prices; amounts already on the sheet are never recalculated.
++  void _applyPrices(LocationPrices p, String? fromLocation) {
++    setState(() {
++      _aluminumMultiplier = p.aluminum;
++      _glassMultiplier = p.glass;
++      _plasticMultiplier = p.pete;
++      _pricesFromLocation = fromLocation;
++      _priceBannerDismissed = null;
++      _pricesEditedHere = false;
++    });
++    _saveDraft();
++  }
++
++  /// Banner above the sheet about prices, and the quiet switch to the
++  /// location's prices while the sheet is still empty.
++  Widget _buildPriceBanner() {
++    final appState = ref.watch(appControllerProvider);
++    final loc = _locationOverride ?? appState.nearestLocation;
++    if (loc == null) return const SizedBox.shrink();
++    final async = ref.watch(locationPricesProvider(loc.id));
++    if (!async.hasValue) return const SizedBox.shrink();
++    final lp = async.value;
++
++    Widget banner({
++      required Color bg,
++      required Color border,
++      required Color fg,
++      required IconData icon,
++      required String text,
++      List<Widget> actions = const [],
++    }) {
++      return Container(
++        margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
++        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
++        decoration: BoxDecoration(
++          color: bg,
++          borderRadius: BorderRadius.circular(12),
++          border: Border.all(color: border),
++        ),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            Row(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Icon(icon, size: 20, color: fg),
++                const SizedBox(width: 10),
++                Expanded(child: Text(text, style: TextStyle(fontSize: 13, height: 1.35, color: fg))),
++              ],
++            ),
++            if (actions.isNotEmpty)
++              Align(
++                alignment: Alignment.centerRight,
++                child: Wrap(spacing: 4, runSpacing: 4, children: actions),
++              ),
++          ],
++        ),
++      );
++    }
++
++    if (lp == null) {
++      if (_pricesEditedHere) return const SizedBox.shrink();
++      return banner(
++        bg: AppColors.amberSoft,
++        border: AppColors.amberLine,
++        fg: AppColors.amberText,
++        icon: Icons.sell_outlined,
++        text: 'No prices are set for ${loc.name} yet. This sheet uses '
++            '${LocationPrices.fmt(_aluminumMultiplier)} aluminum · ${LocationPrices.fmt(_glassMultiplier)} glass · '
++            '${LocationPrices.fmt(_plasticMultiplier)} PETE per lb. An admin can set them in Locations.',
++      );
++    }
++
++    if (lp.sameAs(_sheetPrices)) {
++      _pricesFromLocation = loc.id;
++      return const SizedBox.shrink();
++    }
++
++    // Sheet still empty: just use the location's prices.
++    if (!_sheetsHaveData && !_pricesEditedHere) {
++      if (!_priceSyncScheduled) {
++        _priceSyncScheduled = true;
++        WidgetsBinding.instance.addPostFrameCallback((_) {
++          _priceSyncScheduled = false;
++          if (mounted) _applyPrices(lp, loc.id);
++        });
++      }
++      return const SizedBox.shrink();
++    }
++
++    final key = '${loc.id}|${lp.signature}';
++    if (_priceBannerDismissed == key) return const SizedBox.shrink();
++
++    final diffs = <String>[
++      for (final k in ['aluminum', 'glass', 'pete'])
++        if ((lp[k] - _sheetPrices[k]).abs() > 1e-9)
++          '${LocationPrices.labels[k]} ${LocationPrices.fmt(lp[k])} (sheet ${LocationPrices.fmt(_sheetPrices[k])})',
++    ];
++    return banner(
++      bg: AppColors.blueTint,
++      border: AppColors.blue.withValues(alpha: 0.35),
++      fg: AppColors.blueText,
++      icon: Icons.price_change_outlined,
++      text: '${loc.name} prices are different from this sheet: ${diffs.join(' · ')}. '
++          'Switching only affects rows entered after it; amounts already on the sheet stay as they are.',
++      actions: [
++        TextButton(
++          onPressed: () {
++            setState(() => _priceBannerDismissed = key);
++            _saveDraft();
++          },
++          child: const Text('Keep sheet prices'),
++        ),
++        FilledButton(
++          style: FilledButton.styleFrom(backgroundColor: AppColors.blue),
++          onPressed: () => _applyPrices(lp, loc.id),
++          child: const Text('Use new prices'),
++        ),
++      ],
++    );
++  }
++
+   /// Receipts issued while this sheet was being filled: "sheet-row" -> receipt id.
+   /// Linked to the entry document once the sheet is submitted.
+   final Map<String, String> _receiptIdsByCell = {};
+@@ -289,6 +445,9 @@
+         'aluminumMultiplier': _aluminumMultiplier,
+         'glassMultiplier': _glassMultiplier,
+         'plasticMultiplier': _plasticMultiplier,
++        'pricesFromLocation': _pricesFromLocation,
++        'priceBannerDismissed': _priceBannerDismissed,
++        'pricesEditedHere': _pricesEditedHere,
+         'receiptIds': _receiptIdsByCell,
+       };
+       if (_locationOverride != null) {
+@@ -386,6 +545,9 @@
+         _plasticMultiplier =
+             (draft['plasticMultiplier'] as num).toDouble();
+       }
++      _pricesFromLocation = draft['pricesFromLocation'] as String?;
++      _priceBannerDismissed = draft['priceBannerDismissed'] as String?;
++      _pricesEditedHere = draft['pricesEditedHere'] == true;
+       if (draft['locationOverride'] != null) {
+         final loc = draft['locationOverride'] as Map<String, dynamic>;
+         _locationOverride = AppLocation(
+@@ -543,6 +705,16 @@
+   /// Show dialog to edit the price-per-pound multiplier for a material section.
+   /// [sectionIndex] 0 = Aluminum, 1 = Glass, 2 = Plastic.
+   Future<void> _showEditMultiplierDialog(int sectionIndex) async {
++    // Prices come from Locations › Prices. Only admins may override them for
++    // one sheet, and the value is range-checked like the admin editor.
++    final isAdmin = ref.read(currentUserRoleProvider).valueOrNull == 'admin';
++    if (!isAdmin) {
++      ScaffoldMessenger.of(context).showSnackBar(
++        const SnackBar(content: Text('Prices are set by an admin in Locations › Prices.')),
++      );
++      return;
++    }
++    const keys = ['aluminum', 'glass', 'pete'];
+     String label;
+     double value;
+     switch (sectionIndex) {
+@@ -565,16 +737,30 @@
+     final result = await showDialog<String>(
+       context: context,
+       builder: (context) => AlertDialog(
+-        title: Text('Edit price: $label'),
+-        content: TextField(
+-          controller: controller,
+-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+-          autofocus: true,
+-          decoration: const InputDecoration(
+-            hintText: 'e.g. 1.80',
+-            border: OutlineInputBorder(),
+-          ),
+-          onSubmitted: (v) => Navigator.pop(context, v),
++        title: Text('This sheet only: $label'),
++        content: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            const Text(
++              'Changes the price for rows entered after this, on this sheet only. '
++              'To change the location price for everyone, use Locations › Prices.',
++              style: TextStyle(fontSize: 13),
++            ),
++            const SizedBox(height: 12),
++            TextField(
++              controller: controller,
++              keyboardType: const TextInputType.numberWithOptions(decimal: true),
++              autofocus: true,
++              decoration: const InputDecoration(
++                hintText: 'e.g. 1.80',
++                prefixText: '\$ ',
++                suffixText: '/ lb',
++                border: OutlineInputBorder(),
++              ),
++              onSubmitted: (v) => Navigator.pop(context, v),
++            ),
++          ],
+         ),
+         actions: [
+           TextButton(
+@@ -589,9 +775,18 @@
+       ),
+     );
+     if (result == null) return;
+-    final newVal = double.tryParse(result.trim());
+-    if (newVal == null || newVal < 0) return;
++    final (newVal, error) = LocationPrices.parse(keys[sectionIndex], result);
++    if (newVal == null) {
++      if (mounted) {
++        ScaffoldMessenger.of(context).showSnackBar(
++          SnackBar(content: Text('Price not changed: $error'), backgroundColor: Colors.orange),
++        );
++      }
++      return;
++    }
++    if ((newVal - value).abs() < 1e-9) return;
+     setState(() {
++      _pricesEditedHere = true;
+       switch (sectionIndex) {
+         case 0:
+           _aluminumMultiplier = newVal;
+@@ -604,6 +799,7 @@
+           break;
+       }
+     });
++    _saveDraft();
+   }
+ 
+   // Method to calculate totals for each column and update the last row
+@@ -1969,7 +2165,7 @@
+                           ),
+                         ),
+                         Text(
+-                          '\$${_aluminumMultiplier.toStringAsFixed(2)}/lb',
++                          '${LocationPrices.fmt(_aluminumMultiplier)}/lb',
+                           style: TextStyle(fontSize: 7, color: Colors.blue[700]),
+                         ),
+                       ],
+@@ -2067,7 +2263,7 @@
+                           ),
+                         ),
+                         Text(
+-                          '\$${_glassMultiplier.toStringAsFixed(3)}/lb',
++                          '${LocationPrices.fmt(_glassMultiplier)}/lb',
+                           style: TextStyle(fontSize: 7, color: Colors.blue[700]),
+                         ),
+                       ],
+@@ -2165,7 +2361,7 @@
+                           ),
+                         ),
+                         Text(
+-                          '\$${_plasticMultiplier.toStringAsFixed(2)}/lb',
++                          '${LocationPrices.fmt(_plasticMultiplier)}/lb',
+                           style: TextStyle(fontSize: 7, color: Colors.blue[700]),
+                         ),
+                       ],
+@@ -3107,6 +3303,14 @@
+           'hasSignatures': signaturePoints.isNotEmpty,
+           'signatureCount': signaturePoints.length,
+           'customerNames': customerNames, // Add customer names to sheet data
++          // $/lb this sheet was priced with (audit trail).
++          'prices': {
++            ..._sheetPrices.toPlainMap(),
++            'source': _pricesEditedHere
++                ? 'edited'
++                : (_pricesFromLocation != null ? 'location' : 'standard'),
++            if (_pricesFromLocation != null) 'locationId': _pricesFromLocation,
++          },
+         };
+ 
+         _logSubmissionProgress('Processed sheet $sheetNumber');
+@@ -3882,6 +4086,7 @@
+           behavior: const _TwoDimensionalScrollBehavior(),
+           child: Column(
+             children: [
++              _buildPriceBanner(),
+               // Main scrollable content area - padding is inside so content scrolls to full width
+               Expanded(
+                 child: SingleChildScrollView(
+@@ -4090,6 +4295,7 @@
+             children: [
+               _buildPhoneInfoStrip(),
+               const Divider(height: 1, color: AppColors.line),
++              _buildPriceBanner(),
+               Expanded(
+                 child: ScrollConfiguration(
+                   behavior: const _TwoDimensionalScrollBehavior(),

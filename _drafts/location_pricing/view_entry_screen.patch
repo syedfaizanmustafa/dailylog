@@ -1,0 +1,31 @@
+--- lib/screens/view_entry_screen.dart	2026-10-09 19:17:21.012312969 +0500
++++ lib/screens/view_entry_screen.dart	2026-10-09 19:14:28.430541503 +0500
+@@ -1733,7 +1733,12 @@
+           }
+         }
+ 
++        // Keep everything else stored on the sheet (customer names, the
++        // prices it was entered with, …); only the grid and counts change.
++        final original = (_entryData?['sheets'] as Map?)?[sheetNumber.toString()];
++        final names = _sheetsCustomerNames[sheetNumber];
+         updatedSheets[sheetNumber.toString()] = {
++          if (original is Map) ...Map<String, dynamic>.from(original),
+           'data': {
+             'rows': sheetGridData.length,
+             'columns': sheetGridData[0].length,
+@@ -1742,6 +1747,7 @@
+           'hasSignatures':
+               _sheetsSignaturePoints[sheetNumber]?.isNotEmpty ?? false,
+           'signatureCount': _sheetsSignaturePoints[sheetNumber]?.length ?? 0,
++          if (names != null && names.isNotEmpty) 'customerNames': names,
+         };
+       }
+ 
+@@ -1753,6 +1759,7 @@
+             'updatedAt': DateTime.now().toIso8601String(),
+           });
+       _lastSaveOk = true;
++      _entryData?['sheets'] = updatedSheets;
+ 
+       // Save signature points to subcollections if any exist
+       for (final entry in _sheetsSignaturePoints.entries) {

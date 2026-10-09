@@ -1,0 +1,426 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+
+import '../config/brand.dart';
+import '../controllers/app_controller.dart';
+import '../models/location_prices.dart';
+import 'admin_shell.dart';
+
+const _keys = ['aluminum', 'glass', 'pete'];
+const _colors = {'aluminum': AppColors.blue, 'glass': AppColors.green, 'pete': AppColors.amber};
+
+/// Admin: edit one location's $/lb prices. Every value is range-checked,
+/// changes are shown old → new before saving, big jumps need an extra tick,
+/// and each save is kept in the location's price history.
+Future<void> showLocationPriceEditor({
+  required BuildContext context,
+  required AppLocation location,
+  required LocationPrices? current,
+  required List<PriceChange> history,
+  required Map<String, (String, LocationPrices)> otherLocations,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    backgroundColor: Colors.white,
+    builder: (_) => _PriceEditor(
+      location: location,
+      current: current,
+      history: history,
+      otherLocations: otherLocations,
+    ),
+  );
+}
+
+class _PriceEditor extends ConsumerStatefulWidget {
+  final AppLocation location;
+  final LocationPrices? current;
+  final List<PriceChange> history;
+  final Map<String, (String, LocationPrices)> otherLocations;
+
+  const _PriceEditor({
+    required this.location,
+    required this.current,
+    required this.history,
+    required this.otherLocations,
+  });
+
+  @override
+  ConsumerState<_PriceEditor> createState() => _PriceEditorState();
+}
+
+class _PriceEditorState extends ConsumerState<_PriceEditor> {
+  late final Map<String, TextEditingController> _ctl;
+  bool _saving = false;
+  bool _showHistory = false;
+
+  LocationPrices get _base => widget.current ?? LocationPrices.standard;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctl = {
+      for (final k in _keys)
+        k: TextEditingController(text: NumberFormat('0.00##').format(_base[k])),
+    };
+  }
+
+  @override
+  void dispose() {
+    for (final c in _ctl.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  (double?, String?) _read(String k) => LocationPrices.parse(k, _ctl[k]!.text);
+
+  LocationPrices? get _entered {
+    final v = {for (final k in _keys) k: _read(k).$1};
+    if (v.values.any((x) => x == null)) return null;
+    return LocationPrices(aluminum: v['aluminum']!, glass: v['glass']!, pete: v['pete']!);
+  }
+
+  bool get _changed {
+    final e = _entered;
+    if (e == null) return false;
+    return widget.current == null || !e.sameAs(widget.current!);
+  }
+
+  double? _pct(String k) {
+    final v = _read(k).$1;
+    final old = widget.current?[k];
+    if (v == null || old == null || old == 0) return null;
+    return (v - old) / old;
+  }
+
+  void _copyFrom(LocationPrices p) {
+    setState(() {
+      for (final k in _keys) {
+        _ctl[k]!.text = NumberFormat('0.00##').format(p[k]);
+      }
+    });
+  }
+
+  Future<void> _review() async {
+    final next = _entered;
+    if (next == null) return;
+    final old = widget.current;
+    final big = _keys.where((k) => (_pct(k)?.abs() ?? 0) > LocationPrices.bigChange).toList();
+    var checked = big.isEmpty;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, setD) => AlertDialog(
+          title: Text('Save prices for ${widget.location.name}?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final k in _keys)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 110,
+                          child: Text(LocationPrices.labels[k]!,
+                              style: const TextStyle(fontWeight: FontWeight.w600)),
+                        ),
+                        Expanded(
+                          child: Text(
+                            old == null
+                                ? '${LocationPrices.fmt(next[k])} / lb'
+                                : (old[k] - next[k]).abs() < 1e-9
+                                    ? '${LocationPrices.fmt(next[k])} / lb (no change)'
+                                    : '${LocationPrices.fmt(old[k])} → ${LocationPrices.fmt(next[k])} / lb'
+                                        '  (${_pct(k)! >= 0 ? '+' : ''}${(_pct(k)! * 100).toStringAsFixed(1)}%)',
+                            style: TextStyle(
+                              color: big.contains(k) ? AppColors.redText : AppColors.navy,
+                              fontWeight: big.contains(k) ? FontWeight.w700 : FontWeight.w400,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                const Text(
+                  'New sheets at this location use these prices from now on. A sheet already in progress '
+                  'asks staff before switching, and rows already entered keep their amounts.',
+                  style: TextStyle(fontSize: 13, color: AppColors.slate),
+                ),
+                if (big.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: AppColors.redTint,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      'Big change: ${big.map((k) => LocationPrices.labels[k]).join(', ')} moved more than '
+                      '${(LocationPrices.bigChange * 100).round()}%. Check for a typo (e.g. 18.0 instead of 1.80).',
+                      style: const TextStyle(fontSize: 13, color: AppColors.redText),
+                    ),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    value: checked,
+                    onChanged: (v) => setD(() => checked = v ?? false),
+                    title: const Text('I double-checked these prices'),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Back')),
+            FilledButton(
+              onPressed: checked ? () => Navigator.pop(c, true) : null,
+              style: FilledButton.styleFrom(backgroundColor: AppColors.forest),
+              child: const Text('Save prices'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() => _saving = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      final users = ref.read(adminUsersProvider).valueOrNull ?? const <AdminUser>[];
+      final me = users.where((u) => u.id == user?.uid).firstOrNull;
+      await LocationPrices.save(
+        locationId: widget.location.id,
+        prices: next,
+        byUid: user?.uid ?? '',
+        byName: me?.displayName ?? user?.email ?? 'Admin',
+      );
+      if (!mounted) return;
+      HapticFeedback.mediumImpact();
+      Navigator.of(context).pop();
+      showAppSnack(context, 'Prices saved for ${widget.location.name}');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      showAppSnack(context, 'Prices not saved: ${friendlyError(e)}', error: true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entered = _entered;
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Prices · ${widget.location.name}',
+                style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700, color: AppColors.navy)),
+            const SizedBox(height: 4),
+            const Text(
+              'Price per pound of SW weight. New Entry multiplies the weight by these to fill '
+              'Total Paid. Other commodities are still priced on the sheet.',
+              style: TextStyle(fontSize: 13, color: AppColors.slate),
+            ),
+            const SizedBox(height: 10),
+            if (widget.current == null)
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppColors.amberSoft,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppColors.amberLine),
+                ),
+                child: const Text(
+                  'No prices set for this location yet. Sheets here use the standard prices '
+                  'below until you save.',
+                  style: TextStyle(fontSize: 13, color: AppColors.amberText),
+                ),
+              )
+            else if (widget.current!.updatedAt != null)
+              Text(
+                'Last changed ${DateFormat('MMM d, yyyy h:mm a').format(widget.current!.updatedAt!.toLocal())}'
+                '${widget.current!.updatedByName.isEmpty ? '' : ' by ${widget.current!.updatedByName}'}',
+                style: const TextStyle(fontSize: 12.5, color: AppColors.slate),
+              ),
+            if (widget.otherLocations.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: PopupMenuButton<LocationPrices>(
+                  onSelected: _copyFrom,
+                  itemBuilder: (_) => [
+                    for (final e in widget.otherLocations.values)
+                      PopupMenuItem(
+                        value: e.$2,
+                        child: Text(
+                          '${e.$1}:  ${LocationPrices.fmt(e.$2.aluminum)} · ${LocationPrices.fmt(e.$2.glass)} · ${LocationPrices.fmt(e.$2.pete)}',
+                        ),
+                      ),
+                  ],
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.copy_rounded, size: 18, color: AppColors.blue),
+                        SizedBox(width: 6),
+                        Text('Copy prices from another location',
+                            style: TextStyle(color: AppColors.blue, fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 8),
+            for (final k in _keys) _priceField(k),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size.fromHeight(50),
+                      foregroundColor: AppColors.navy,
+                      side: const BorderSide(color: AppColors.field),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(50),
+                      backgroundColor: AppColors.forest,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    onPressed: _saving || entered == null || !_changed ? null : _review,
+                    icon: _saving
+                        ? const SizedBox(
+                            width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        : const Icon(Icons.fact_check_rounded),
+                    label: Text(entered == null
+                        ? 'Fix the prices above'
+                        : (_changed ? 'Review & save' : 'No changes')),
+                  ),
+                ),
+              ],
+            ),
+            if (widget.history.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              InkWell(
+                onTap: () => setState(() => _showHistory = !_showHistory),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.history_rounded, size: 18, color: AppColors.slate),
+                      const SizedBox(width: 6),
+                      Text('Price history (${widget.history.length})',
+                          style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.navy)),
+                      Icon(_showHistory ? Icons.expand_less : Icons.expand_more, color: AppColors.slate),
+                    ],
+                  ),
+                ),
+              ),
+              if (_showHistory)
+                for (final h in widget.history.take(15))
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text(
+                      '${DateFormat('MMM d, yyyy h:mm a').format(h.at.toLocal())}'
+                      '${h.byName.isEmpty ? '' : ' · ${h.byName}'}\n'
+                      'Al ${LocationPrices.fmt(h.prices.aluminum)} · Glass ${LocationPrices.fmt(h.prices.glass)}'
+                      ' · PETE ${LocationPrices.fmt(h.prices.pete)}',
+                      style: const TextStyle(fontSize: 12.5, height: 1.4, color: AppColors.slate),
+                    ),
+                  ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _priceField(String k) {
+    final (value, error) = _read(k);
+    final pct = _pct(k);
+    final big = (pct?.abs() ?? 0) > LocationPrices.bigChange;
+    final example = value == null ? null : NumberFormat.currency(symbol: '\$').format(value * 10);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            margin: const EdgeInsets.only(top: 18),
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(color: _colors[k], borderRadius: BorderRadius.circular(3)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: TextField(
+              controller: _ctl[k],
+              enabled: !_saving,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.$]'))],
+              onChanged: (_) => setState(() {}),
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+              decoration: InputDecoration(
+                labelText: LocationPrices.labels[k],
+                prefixText: '\$ ',
+                suffixText: '/ lb',
+                errorText: error,
+                helperText: error != null
+                    ? null
+                    : [
+                        if (widget.current != null) 'Now ${LocationPrices.fmt(widget.current![k])}',
+                        if (example != null) '10 lb pays $example',
+                      ].join('  ·  '),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+          if (pct != null && pct.abs() > 1e-9) ...[
+            const SizedBox(width: 8),
+            Container(
+              margin: const EdgeInsets.only(top: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: big ? AppColors.redTint : AppColors.amberTint,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '${pct >= 0 ? '+' : ''}${(pct * 100).toStringAsFixed(1)}%',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: big ? AppColors.redText : AppColors.amberText,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}

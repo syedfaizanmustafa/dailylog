@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../config/brand.dart';
 import '../controllers/app_controller.dart';
 import '../controllers/auth_controller.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -19,6 +20,9 @@ import '../widgets/dual_numeric_cell_editor.dart';
 import '../widgets/floating_confirmation_sheet.dart';
 import '../widgets/logout_confirmation_sheet.dart';
 import '../widgets/single_numeric_cell_editor.dart';
+import '../models/receipt.dart';
+import '../services/receipt_service.dart';
+import 'receipt_screen.dart';
 
 class _TwoDimensionalScrollBehavior extends MaterialScrollBehavior {
   const _TwoDimensionalScrollBehavior();
@@ -74,11 +78,14 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     // CUSTOMER SIGN
     signColWidth,
   ];
-  double get _totalGridWidth {
+  double get _totalGridWidth => _sheetGridWidth + receiptColWidth + 32.0; // + receipt column + padding allowance
+
+  /// The paper sheet itself (columns + header Total Paid column).
+  double get _sheetGridWidth {
     try {
-      return columnWidths.fold(0.0, (sum, w) => sum + w) + 32.0 + colWidth; // padding allowance + header Total Paid column
+      return columnWidths.fold(0.0, (sum, w) => sum + w) + colWidth;
     } catch (_) {
-      return 1200.0;
+      return 1168.0;
     }
   }
   late List<List<String>> gridData;
@@ -113,6 +120,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
 
   /// Admin-selected location override. When non-null, used instead of nearestLocation for display and submission.
   AppLocation? _locationOverride;
+
+  /// Receipts issued while this sheet was being filled: "sheet-row" -> receipt id.
+  /// Linked to the entry document once the sheet is submitted.
+  final Map<String, String> _receiptIdsByCell = {};
 
   // Helper method to compress signature data
   Map<String, String> _compressSignatures(Map<String, Uint8List>? signatures) {
@@ -278,6 +289,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
         'aluminumMultiplier': _aluminumMultiplier,
         'glassMultiplier': _glassMultiplier,
         'plasticMultiplier': _plasticMultiplier,
+        'receiptIds': _receiptIdsByCell,
       };
       if (_locationOverride != null) {
         draft['locationOverride'] = {
@@ -322,6 +334,11 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
 
       // Restore signature strokes so signed cells re-render (and re-submit)
       // instead of showing "Signed" with no signature behind it.
+      final receiptIdsRaw = draft['receiptIds'] as Map<String, dynamic>?;
+      if (receiptIdsRaw != null) {
+        receiptIdsRaw.forEach((k, v) => _receiptIdsByCell[k] = v.toString());
+      }
+
       final signaturePointsRaw =
           draft['signaturePoints'] as Map<String, dynamic>?;
       if (signaturePointsRaw != null) {
@@ -688,9 +705,20 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     }
 
     if (col == 21) {
+      // Pass any existing name + signature so the customer screen opens
+      // pre-filled instead of blank when editing an already-signed cell.
+      String existingName = '';
+      if (value.contains('/') && value.contains('Signed')) {
+        existingName = value.split('/')[0];
+      }
+      final existingPoints =
+          _sheetsSignaturePoints[_currentSheetNumber]?['$row-$col'];
+      bool signedNow = false;
       await context.push(
         '/customer',
         extra: {
+          'existingName': existingName,
+          'existingPoints': existingPoints,
           'onSignatureComplete': (
             Uint8List signatureBytes,
             String customerName,
@@ -711,6 +739,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
               _sheetsSignaturePoints[_currentSheetNumber]!['$row-$col'] =
                   signaturePoints;
               _currentGridData[row][col] = '$customerName/Signed';
+              signedNow = true;
               print(
                 'Saved ${signaturePoints.length} signature points for cell $row-$col',
               );
@@ -718,6 +747,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
           },
         },
       );
+      // Customer just signed: hand them their receipt right away.
+      if (signedNow && mounted) {
+        await _openReceiptForRow(row);
+      }
     } else if (col == 15) {
       // CODE column (standalone column after TP-PL)
       final String? result = await showDialog<String>(
@@ -1093,6 +1126,86 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
         _selectedDate = picked;
       });
     }
+  }
+
+  // ── Customer receipts ────────────────────────────────────────────────
+
+  /// Opens the receipt for [row] of the current sheet (issuing one if the
+  /// customer has signed but no receipt exists yet).
+  Future<void> _openReceiptForRow(int row) async {
+    if (row >= rowCount || row >= _currentGridData.length) return;
+    final cellKey = '$_currentSheetNumber-$row';
+    final existingId = _receiptIdsByCell[cellKey];
+    if (existingId != null) {
+      await openReceiptScreen(context, receiptId: existingId);
+      return;
+    }
+
+    final signCell = _currentGridData[row].length > 21
+        ? _currentGridData[row][21]
+        : '';
+    final points = _sheetsSignaturePoints[_currentSheetNumber]?['$row-21'];
+    if (!signCell.contains('Signed') || points == null || points.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('The customer needs to sign before a receipt can be issued.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    final rowTotal = _currentGridData[row].length > 20
+        ? _parseCellValue(_currentGridData[row][20])
+        : 0.0;
+    if (rowTotal <= 0) {
+      // Don't burn a receipt number on an empty row.
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Enter the amounts for this row, then long-press the signature cell to issue the receipt.',
+          ),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    final customerName = signCell.split('/').first.trim();
+    final container = ProviderScope.containerOf(context, listen: false);
+    final location =
+        _locationOverride ?? container.read(appControllerProvider).nearestLocation;
+
+    final draft = ReceiptData.fromGridRow(
+      cells: _currentGridData[row],
+      row: row,
+      sheetNumber: _currentSheetNumber,
+      date: _selectedDate,
+      customerName: customerName,
+      signature: points
+          .map((p) => ReceiptSignaturePoint(p.offset.dx, p.offset.dy, p.type.index))
+          .toList(),
+      certification: location?.certification ?? '',
+      recyclerName: location?.name ?? '',
+      recyclerAddress: location?.address ?? '',
+      locationId: location?.id,
+      priceHints: {
+        ReceiptMaterial.aluminum: _aluminumMultiplier,
+        ReceiptMaterial.glass: _glassMultiplier,
+        ReceiptMaterial.pete: _plasticMultiplier,
+      },
+    );
+
+    await openReceiptScreen(
+      context,
+      draft: draft,
+      onIssued: (issued) {
+        if (issued.id != null) {
+          _receiptIdsByCell[cellKey] = issued.id!;
+          _saveDraft();
+        }
+      },
+    );
   }
 
   Widget _buildSignatureCell(int row, int col) {
@@ -1473,9 +1586,166 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     );
   }
 
+  /// The sheet grid followed by the receipt column.
   Widget _buildGrid() {
     return SizedBox(
       width: _totalGridWidth,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSheetGrid(),
+          _buildReceiptColumn(),
+        ],
+      ),
+    );
+  }
+
+  // ── Receipt column (classic grid only; the PDF is unchanged) ──────────
+
+  static const double receiptColWidth = 130;
+
+  /// Header (same height as the grid's three header rows) + one cell per row.
+  Widget _buildReceiptColumn() {
+    return SizedBox(
+      width: receiptColWidth,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            height: 132,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              border: Border.all(color: Colors.black, width: 1),
+            ),
+            child: const Text(
+              'RECEIPT',
+              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14, letterSpacing: 1.2),
+            ),
+          ),
+          for (int row = 0; row < rowCount; row++) _buildReceiptCell(row),
+        ],
+      ),
+    );
+  }
+
+  Widget _receiptCellBox({required Widget child, VoidCallback? onTap, Color color = Colors.white}) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        width: receiptColWidth,
+        height: 48,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: color,
+          border: Border.all(color: Colors.black, width: 1),
+        ),
+        child: child,
+      ),
+    );
+  }
+
+  /// Receipt number + delivery status, or "Issue" for a signed, paid row.
+  Widget _receiptCellContent(ReceiptData? r, {required bool canIssue}) {
+    if (r != null) {
+      final status = r.sms.requested
+          ? (r.sms.status == 'delivered'
+              ? 'Texted'
+              : (r.sms.status == 'failed' || r.sms.status == 'undelivered' ? 'Text failed' : 'Texting'))
+          : (r.printed ? 'Printed' : 'Issued');
+      final failed = status == 'Text failed';
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            '#${r.receiptNumberLabel}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: AppColors.forest),
+          ),
+          Text(
+            status,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: failed ? AppColors.redText : AppColors.slate,
+            ),
+          ),
+        ],
+      );
+    }
+    if (canIssue) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: AppColors.amberTint,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.amberLine),
+        ),
+        child: const Text('Issue',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.amberText)),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  /// Issued receipts by id (for the receipt column).
+  final Map<String, ReceiptData> _receiptCache = {};
+
+  /// Ids already asked for, so a build never starts the same fetch twice.
+  final Set<String> _receiptRequested = {};
+
+  Future<void> _refreshReceiptCache() async {
+    final missing = _receiptIdsByCell.values
+        .where((id) => !_receiptCache.containsKey(id) && !_receiptRequested.contains(id))
+        .toSet();
+    if (missing.isEmpty) return;
+    _receiptRequested.addAll(missing);
+    try {
+      final fetched = await Future.wait(missing.map(ReceiptService.getById));
+      if (!mounted) return;
+      setState(() {
+        for (final r in fetched) {
+          if (r?.id != null) _receiptCache[r!.id!] = r;
+        }
+      });
+    } catch (e) {
+      print('New entry: receipts not loaded: $e');
+    }
+  }
+
+  Widget _buildReceiptCell(int row) {
+    final id = _receiptIdsByCell['$_currentSheetNumber-$row'];
+    final r = id == null ? null : _receiptCache[id];
+    if (id != null && r == null) _refreshReceiptCache();
+    final cells = row < _currentGridData.length ? _currentGridData[row] : const <String>[];
+    final signed = cells.length > 21 && cells[21].contains('Signed');
+    final total = cells.length > 20 ? _parseCellValue(cells[20]) : 0.0;
+    final canIssue = id == null && signed && total > 0;
+    return _receiptCellBox(
+      color: id != null ? const Color(0xFFF1F8EC) : Colors.white,
+      onTap: id == null && !canIssue
+          ? null
+          : () async {
+              await _openReceiptForRow(row);
+              final newId = _receiptIdsByCell['$_currentSheetNumber-$row'];
+              if (newId != null) {
+                _receiptCache.remove(newId);
+                _receiptRequested.remove(newId);
+              }
+              if (mounted) _refreshReceiptCache();
+            },
+      child: id != null && r == null
+          ? const Text('Issued', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600))
+          : _receiptCellContent(r, canIssue: canIssue),
+    );
+  }
+
+  Widget _buildSheetGrid() {
+    return SizedBox(
+      width: _sheetGridWidth,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -2291,9 +2561,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    // Customer sign (column 21)
+                    // Customer sign (column 21) — long press re-opens the receipt
                     GestureDetector(
                       onTap: () => _editCell(row, 21),
+                      onLongPress: () => _openReceiptForRow(row),
                       child: Container(
                         width: signColWidth,
                         height: 48,
@@ -2803,18 +3074,23 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
           'Found ${signaturePoints.length} signature points for sheet $sheetNumber',
         );
 
-        // Extract customer names from grid data
+        // Extract customer names from the grid as entered (the signature
+        // column 21 is cut off by the 21-column sanitising above).
         final customerNames = <String, String>{};
+        String originalCell(int r, int c) {
+          try {
+            final rowData = gridData[r];
+            if (rowData is List && c < rowData.length) return rowData[c].toString();
+          } catch (_) {}
+          return '';
+        }
         signaturePoints.forEach((key, points) {
           final rowCol = key.split('-');
           if (rowCol.length == 2) {
             final row = int.tryParse(rowCol[0]);
             final col = int.tryParse(rowCol[1]);
-            if (row != null &&
-                col != null &&
-                row < sanitizedGridData.length &&
-                col < sanitizedGridData[row].length) {
-              final cellData = sanitizedGridData[row][col];
+            if (row != null && col != null) {
+              final cellData = originalCell(row, col);
               if (cellData.contains('/') && cellData.contains('Signed')) {
                 final parts = cellData.split('/');
                 customerNames[key] = parts[0]; // Store the customer name
@@ -3303,8 +3579,289 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     );
   }
 
+  void _goToPreviousSheet() {
+    if (_currentSheetNumber <= 1) return;
+    setState(() {
+      _currentSheetNumber--;
+    });
+    // Calculate totals for the new sheet
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _calculateAndUpdateTotals();
+    });
+  }
+
+  void _goToNextSheet() {
+    setState(() {
+      _currentSheetNumber++;
+      _initializeSheet(_currentSheetNumber);
+    });
+    // Calculate totals for the new sheet
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _calculateAndUpdateTotals();
+    });
+  }
+
+  Future<void> _onSubmitPressed() async {
+        final confirmed =
+            await showFloatingConfirmationBottomSheet(
+          context: context,
+          title: 'Submit entry?',
+          message:
+              'Your log sheet will be saved to your account. Continue?',
+          confirmLabel: 'Submit',
+        );
+        if (!confirmed || !mounted) return;
+
+        setState(() {
+          _isSubmitting = true;
+        });
+
+        try {
+          final user =
+              ref.read(authControllerProvider).value;
+          if (user == null) {
+            throw Exception(
+              'No authenticated user found',
+            );
+          }
+
+          _logSubmissionProgress(
+            'User authenticated: ${user.uid}',
+          );
+
+          if (!_validateData()) {
+            setState(() {
+              _isSubmitting = false;
+            });
+            return;
+          }
+
+          _logSubmissionProgress(
+            'Data validation passed',
+          );
+
+          // Check data size and warn if necessary
+          _checkDataSize();
+
+          // Show loading message
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Submitting entry...'),
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+
+          _logSubmissionProgress(
+            'Testing Firestore connection...',
+          );
+
+          // Test Firestore connection first
+          await _testFirestoreConnection();
+
+          _logSubmissionProgress(
+            'Running minimal Firestore tests...',
+          );
+
+          // Run minimal tests to isolate the issue
+          await _testMinimalFirestore();
+
+          _logSubmissionProgress(
+            'Preparing Firestore data',
+          );
+
+          // For debugging: try with test data first
+          Map<String, dynamic> entryData;
+          try {
+            entryData = await _prepareEntryData(
+              user.uid,
+              user.email!,
+            );
+          } catch (e) {
+            print('Error preparing entry data: $e');
+            // Fallback to test data
+            print('Falling back to test data');
+            entryData = await _createTestData(
+              user.uid,
+              user.email!,
+            );
+          }
+
+          // Validate data size before attempting to save
+          if (!_validateDataSize(entryData)) {
+            setState(() {
+              _isSubmitting = false;
+            });
+            return;
+          }
+
+          // Check if an entry exists for the same location and date
+          final locationId = entryData['location'] as String?;
+          final existingEntryDoc = await _findExistingEntry(
+            locationId,
+            _selectedDate,
+          );
+
+          DocumentReference entryRef;
+          Map<String, dynamic> sheetsToSave = {};
+          Map<int, int> sheetNumberMapping = {}; // Maps old sheet number to new sheet number
+          bool isMergedEntry = false;
+
+          if (existingEntryDoc != null) {
+            isMergedEntry = true;
+            // Entry exists - merge sheets
+            _logSubmissionProgress(
+              'Found existing entry for same location and date. Merging sheets...',
+            );
+        
+            entryRef = existingEntryDoc.reference;
+            final existingData = existingEntryDoc.data() as Map<String, dynamic>?;
+            final existingSheets = existingData?['sheets'] as Map<String, dynamic>? ?? {};
+        
+            // Get the next available sheet number
+            int nextSheetNumber = _getNextSheetNumber(existingSheets);
+        
+            // Remap new sheet numbers to continue from existing sheets
+            for (final entry in _sheetsGridData.entries) {
+              final oldSheetNumber = entry.key;
+              final newSheetNumber = nextSheetNumber++;
+              sheetNumberMapping[oldSheetNumber] = newSheetNumber;
+          
+              // Get the sheet data from entryData
+              final oldSheetKey = oldSheetNumber.toString();
+              if (entryData['sheets'].containsKey(oldSheetKey)) {
+                sheetsToSave[newSheetNumber.toString()] = entryData['sheets'][oldSheetKey];
+              }
+            }
+        
+            // Merge with existing sheets
+            final mergedSheets = Map<String, dynamic>.from(existingSheets);
+            mergedSheets.addAll(sheetsToSave);
+        
+            // Update the existing entry with merged sheets
+            await entryRef.update({
+              'sheets': mergedSheets,
+              'updatedAt': DateTime.now().toIso8601String(),
+            });
+        
+            _logSubmissionProgress(
+              'Merged ${sheetsToSave.length} new sheet(s) into existing entry',
+            );
+          } else {
+            // No existing entry - create new one
+            _logSubmissionProgress(
+              'No existing entry found. Creating new entry...',
+            );
+        
+            entryRef = FirebaseFirestore.instance
+                .collection('entries')
+                .doc();
+            await entryRef.set(entryData);
+        
+            // For new entries, sheet numbers stay the same
+            for (final entry in _sheetsGridData.entries) {
+              sheetNumberMapping[entry.key] = entry.key;
+            }
+            sheetsToSave = Map<String, dynamic>.from(entryData['sheets']);
+          }
+
+          // Save signature points to subcollections with correct sheet numbers
+          for (final entry in _sheetsSignaturePoints.entries) {
+            final oldSheetNumber = entry.key;
+            final newSheetNumber = sheetNumberMapping[oldSheetNumber] ?? oldSheetNumber;
+            final signaturePoints = entry.value;
+
+            if (signaturePoints.isNotEmpty) {
+              try {
+                await _saveSignaturePointsToSubcollection(
+                  entryRef.id,
+                  newSheetNumber.toString(),
+                  signaturePoints,
+                  sourceSheetNumber: oldSheetNumber,
+                );
+                print(
+                  'Saved signature points for sheet $newSheetNumber (was $oldSheetNumber)',
+                );
+              } catch (e) {
+                print(
+                  'Error saving signature points for sheet $newSheetNumber: $e',
+                );
+                // Continue with other sheets even if one fails
+              }
+            }
+          }
+
+          _logSubmissionProgress(
+            'Successfully saved to Firestore',
+          );
+
+          if (!mounted) return;
+
+          // Show success message
+          final message = isMergedEntry
+              ? 'Sheets merged into existing entry successfully'
+              : 'Entry submitted successfully';
+      
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(message),
+              backgroundColor: Colors.green,
+            ),
+          );
+
+          // Wait a short moment to ensure the message is visible
+          await Future.delayed(
+            const Duration(milliseconds: 500),
+          );
+
+          // Attach the submitted entry to receipts issued while filling the sheet.
+          try {
+            await ReceiptService.linkToEntry(
+              receiptIdsByCell: _receiptIdsByCell,
+              entryId: entryRef.id,
+              sheetNumberMapping: sheetNumberMapping,
+            );
+          } catch (e) {
+            print('Error linking receipts to entry: $e');
+          }
+
+          if (mounted) {
+            await _clearDraft();
+            final role = await ref.read(currentUserRoleProvider.future);
+            if (!mounted) return;
+            context.go(role == 'admin' ? '/admin' : '/home');
+          }
+        } catch (e) {
+          print('Error submitting entry: $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Error submitting entry: ${e.toString()}',
+                ),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 5),
+              ),
+            );
+          }
+        } finally {
+          if (mounted) {
+            setState(() {
+              _isSubmitting = false;
+            });
+          }
+        }
+
+  }
+
+  /// Phones (either orientation) get a compact layout; tablets keep the
+  /// original sheet layout unchanged.
+  bool get _isPhone => MediaQuery.sizeOf(context).shortestSide < 600;
+
   @override
   Widget build(BuildContext context) {
+    if (_isPhone) return _buildPhone(context);
     return PopScope<Object?>(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
@@ -3397,17 +3954,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                         children: [
                           if (_currentSheetNumber > 1)
                             TextButton(
-                              onPressed: () {
-                                setState(() {
-                                  _currentSheetNumber--;
-                                });
-                                // Calculate totals for the new sheet
-                                WidgetsBinding.instance.addPostFrameCallback((
-                                  _,
-                                ) {
-                                  _calculateAndUpdateTotals();
-                                });
-                              },
+                              onPressed: _goToPreviousSheet,
                               child: const Text('Previous Sheet'),
                             ),
                           const SizedBox(width: 16),
@@ -3415,18 +3962,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                             height: 40,
                             width: MediaQuery.of(context).size.width * 0.2,
                             child: ElevatedButton(
-                              onPressed: () {
-                                setState(() {
-                                  _currentSheetNumber++;
-                                  _initializeSheet(_currentSheetNumber);
-                                });
-                                // Calculate totals for the new sheet
-                                WidgetsBinding.instance.addPostFrameCallback((
-                                  _,
-                                ) {
-                                  _calculateAndUpdateTotals();
-                                });
-                              },
+                              onPressed: _goToNextSheet,
                               child: const Text('Next Sheet'),
                             ),
                           ),
@@ -3440,250 +3976,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                     width: double.infinity,
                     height: 45,
                     child: ElevatedButton.icon(
-                      onPressed:
-                          _isSubmitting
-                              ? null
-                              : () async {
-                                final confirmed =
-                                    await showFloatingConfirmationBottomSheet(
-                                  context: context,
-                                  title: 'Submit entry?',
-                                  message:
-                                      'Your log sheet will be saved to your account. Continue?',
-                                  confirmLabel: 'Submit',
-                                );
-                                if (!confirmed || !mounted) return;
-
-                                setState(() {
-                                  _isSubmitting = true;
-                                });
-
-                                try {
-                                  final user =
-                                      ref.read(authControllerProvider).value;
-                                  if (user == null) {
-                                    throw Exception(
-                                      'No authenticated user found',
-                                    );
-                                  }
-
-                                  _logSubmissionProgress(
-                                    'User authenticated: ${user.uid}',
-                                  );
-
-                                  if (!_validateData()) {
-                                    setState(() {
-                                      _isSubmitting = false;
-                                    });
-                                    return;
-                                  }
-
-                                  _logSubmissionProgress(
-                                    'Data validation passed',
-                                  );
-
-                                  // Check data size and warn if necessary
-                                  _checkDataSize();
-
-                                  // Show loading message
-                                  if (mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Submitting entry...'),
-                                        duration: Duration(seconds: 2),
-                                      ),
-                                    );
-                                  }
-
-                                  _logSubmissionProgress(
-                                    'Testing Firestore connection...',
-                                  );
-
-                                  // Test Firestore connection first
-                                  await _testFirestoreConnection();
-
-                                  _logSubmissionProgress(
-                                    'Running minimal Firestore tests...',
-                                  );
-
-                                  // Run minimal tests to isolate the issue
-                                  await _testMinimalFirestore();
-
-                                  _logSubmissionProgress(
-                                    'Preparing Firestore data',
-                                  );
-
-                                  // For debugging: try with test data first
-                                  Map<String, dynamic> entryData;
-                                  try {
-                                    entryData = await _prepareEntryData(
-                                      user.uid,
-                                      user.email!,
-                                    );
-                                  } catch (e) {
-                                    print('Error preparing entry data: $e');
-                                    // Fallback to test data
-                                    print('Falling back to test data');
-                                    entryData = await _createTestData(
-                                      user.uid,
-                                      user.email!,
-                                    );
-                                  }
-
-                                  // Validate data size before attempting to save
-                                  if (!_validateDataSize(entryData)) {
-                                    setState(() {
-                                      _isSubmitting = false;
-                                    });
-                                    return;
-                                  }
-
-                                  // Check if an entry exists for the same location and date
-                                  final locationId = entryData['location'] as String?;
-                                  final existingEntryDoc = await _findExistingEntry(
-                                    locationId,
-                                    _selectedDate,
-                                  );
-
-                                  DocumentReference entryRef;
-                                  Map<String, dynamic> sheetsToSave = {};
-                                  Map<int, int> sheetNumberMapping = {}; // Maps old sheet number to new sheet number
-                                  bool isMergedEntry = false;
-
-                                  if (existingEntryDoc != null) {
-                                    isMergedEntry = true;
-                                    // Entry exists - merge sheets
-                                    _logSubmissionProgress(
-                                      'Found existing entry for same location and date. Merging sheets...',
-                                    );
-                                    
-                                    entryRef = existingEntryDoc.reference;
-                                    final existingData = existingEntryDoc.data() as Map<String, dynamic>?;
-                                    final existingSheets = existingData?['sheets'] as Map<String, dynamic>? ?? {};
-                                    
-                                    // Get the next available sheet number
-                                    int nextSheetNumber = _getNextSheetNumber(existingSheets);
-                                    
-                                    // Remap new sheet numbers to continue from existing sheets
-                                    for (final entry in _sheetsGridData.entries) {
-                                      final oldSheetNumber = entry.key;
-                                      final newSheetNumber = nextSheetNumber++;
-                                      sheetNumberMapping[oldSheetNumber] = newSheetNumber;
-                                      
-                                      // Get the sheet data from entryData
-                                      final oldSheetKey = oldSheetNumber.toString();
-                                      if (entryData['sheets'].containsKey(oldSheetKey)) {
-                                        sheetsToSave[newSheetNumber.toString()] = entryData['sheets'][oldSheetKey];
-                                      }
-                                    }
-                                    
-                                    // Merge with existing sheets
-                                    final mergedSheets = Map<String, dynamic>.from(existingSheets);
-                                    mergedSheets.addAll(sheetsToSave);
-                                    
-                                    // Update the existing entry with merged sheets
-                                    await entryRef.update({
-                                      'sheets': mergedSheets,
-                                      'updatedAt': DateTime.now().toIso8601String(),
-                                    });
-                                    
-                                    _logSubmissionProgress(
-                                      'Merged ${sheetsToSave.length} new sheet(s) into existing entry',
-                                    );
-                                  } else {
-                                    // No existing entry - create new one
-                                    _logSubmissionProgress(
-                                      'No existing entry found. Creating new entry...',
-                                    );
-                                    
-                                    entryRef = FirebaseFirestore.instance
-                                        .collection('entries')
-                                        .doc();
-                                    await entryRef.set(entryData);
-                                    
-                                    // For new entries, sheet numbers stay the same
-                                    for (final entry in _sheetsGridData.entries) {
-                                      sheetNumberMapping[entry.key] = entry.key;
-                                    }
-                                    sheetsToSave = Map<String, dynamic>.from(entryData['sheets']);
-                                  }
-
-                                  // Save signature points to subcollections with correct sheet numbers
-                                  for (final entry in _sheetsSignaturePoints.entries) {
-                                    final oldSheetNumber = entry.key;
-                                    final newSheetNumber = sheetNumberMapping[oldSheetNumber] ?? oldSheetNumber;
-                                    final signaturePoints = entry.value;
-
-                                    if (signaturePoints.isNotEmpty) {
-                                      try {
-                                        await _saveSignaturePointsToSubcollection(
-                                          entryRef.id,
-                                          newSheetNumber.toString(),
-                                          signaturePoints,
-                                          sourceSheetNumber: oldSheetNumber,
-                                        );
-                                        print(
-                                          'Saved signature points for sheet $newSheetNumber (was $oldSheetNumber)',
-                                        );
-                                      } catch (e) {
-                                        print(
-                                          'Error saving signature points for sheet $newSheetNumber: $e',
-                                        );
-                                        // Continue with other sheets even if one fails
-                                      }
-                                    }
-                                  }
-
-                                  _logSubmissionProgress(
-                                    'Successfully saved to Firestore',
-                                  );
-
-                                  if (!mounted) return;
-
-                                  // Show success message
-                                  final message = isMergedEntry
-                                      ? 'Sheets merged into existing entry successfully'
-                                      : 'Entry submitted successfully';
-                                  
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(message),
-                                      backgroundColor: Colors.green,
-                                    ),
-                                  );
-
-                                  // Wait a short moment to ensure the message is visible
-                                  await Future.delayed(
-                                    const Duration(milliseconds: 500),
-                                  );
-
-                                  if (mounted) {
-                                    await _clearDraft();
-                                    final role = await ref.read(currentUserRoleProvider.future);
-                                    if (!mounted) return;
-                                    context.go(role == 'admin' ? '/admin' : '/home');
-                                  }
-                                } catch (e) {
-                                  print('Error submitting entry: $e');
-                                  if (mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          'Error submitting entry: ${e.toString()}',
-                                        ),
-                                        backgroundColor: Colors.red,
-                                        duration: const Duration(seconds: 5),
-                                      ),
-                                    );
-                                  }
-                                } finally {
-                                  if (mounted) {
-                                    setState(() {
-                                      _isSubmitting = false;
-                                    });
-                                  }
-                                }
-                              },
+                      onPressed: _isSubmitting ? null : _onSubmitPressed,
                       icon:
                           _isSubmitting
                               ? const SizedBox(
@@ -3709,6 +4002,240 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     ),
     ),   // child: Scaffold
     );   // PopScope
+  }
+
+  // ── Phone layout ────────────────────────────────────────────────────────
+  // Same sheet (_buildGrid) and the same actions as the tablet; only the
+  // chrome around it is compacted so the grid gets the screen.
+
+  Widget _buildPhone(BuildContext context) {
+    final hasNext = _sheetsGridData.containsKey(_currentSheetNumber + 1);
+    return PopScope<Object?>(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _handleBackPress();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          toolbarHeight: 52,
+          automaticallyImplyLeading: false,
+          titleSpacing: 0,
+          leading: IconButton(
+            tooltip: 'Back',
+            icon: const Icon(Icons.arrow_back),
+            onPressed: _handleBackPress,
+          ),
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Sheet $_currentSheetNumber',
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.navy,
+                ),
+              ),
+              Text(
+                DateFormat('EEE, MMM d').format(_selectedDate),
+                style: const TextStyle(fontSize: 12, color: AppColors.slate),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              tooltip: 'Previous sheet',
+              onPressed: _currentSheetNumber > 1 ? _goToPreviousSheet : null,
+              icon: const Icon(Icons.chevron_left_rounded),
+            ),
+            IconButton(
+              tooltip: hasNext ? 'Next sheet' : 'New sheet',
+              onPressed: _goToNextSheet,
+              icon: Icon(
+                hasNext ? Icons.chevron_right_rounded : Icons.note_add_outlined,
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 8, left: 2),
+              child: FilledButton.icon(
+                onPressed: _isSubmitting ? null : _onSubmitPressed,
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.forest,
+                  minimumSize: const Size(0, 38),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  visualDensity: VisualDensity.compact,
+                ),
+                icon: _isSubmitting
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.send_rounded, size: 16),
+                label: Text(_isSubmitting ? 'Saving' : 'Submit'),
+              ),
+            ),
+          ],
+        ),
+        body: SafeArea(
+          top: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildPhoneInfoStrip(),
+              const Divider(height: 1, color: AppColors.line),
+              Expanded(
+                child: ScrollConfiguration(
+                  behavior: const _TwoDimensionalScrollBehavior(),
+                  child: SingleChildScrollView(
+                    primary: true,
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      controller: _horizontalController,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 32),
+                        child: SizedBox(
+                          width: _totalGridWidth,
+                          child: _buildGrid(),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// One swipeable row replacing the tall "LOG SHEET / legends / date"
+  /// header: location, cert #, date (tap to change) and the legend.
+  Widget _buildPhoneInfoStrip() {
+    return Consumer(
+      builder: (context, ref, _) {
+        final appState = ref.watch(appControllerProvider);
+        final isAdmin = ref.watch(currentUserRoleProvider).valueOrNull == 'admin';
+        final loc = _locationOverride ?? appState.nearestLocation;
+        final name = loc?.name ?? '';
+        final cert = loc?.certification ?? '';
+        final address = (loc?.address ?? '').replaceAll('\n', ' ');
+        return SizedBox(
+          height: 50,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            children: [
+              _PhoneInfoChip(
+                icon: Icons.location_on_rounded,
+                label: name.isEmpty ? 'Detecting location…' : name,
+                trailing: isAdmin ? Icons.expand_more_rounded : null,
+                onTap: isAdmin
+                    ? () => _showLocationPickerBottomSheet()
+                    : (address.isEmpty ? null : () => showAppSnack(context, address)),
+              ),
+              if (cert.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                _PhoneInfoChip(icon: Icons.verified_rounded, label: 'Cert # $cert'),
+              ],
+              const SizedBox(width: 8),
+              _PhoneInfoChip(
+                icon: Icons.calendar_today_rounded,
+                label: DateFormat('MM/dd/yyyy').format(_selectedDate),
+                trailing: Icons.expand_more_rounded,
+                highlight: true,
+                onTap: () => _showDatePicker(),
+              ),
+              const SizedBox(width: 8),
+              _PhoneInfoChip(
+                icon: Icons.menu_book_rounded,
+                label: 'Legend',
+                onTap: _showLegendSheet,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showLegendSheet() {
+    Widget row(String code, String text) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 44,
+                child: Text(
+                  code,
+                  style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.navy),
+                ),
+              ),
+              Expanded(child: Text(text, style: const TextStyle(color: AppColors.navy))),
+            ],
+          ),
+        );
+    Widget heading(String t) => Padding(
+          padding: const EdgeInsets.only(top: 14, bottom: 6),
+          child: Text(
+            t,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+              color: AppColors.slate,
+            ),
+          ),
+        );
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(ctx).height * 0.8),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Legend',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.navy),
+                ),
+                heading('BASIC LEGEND'),
+                row('SW', 'Segregated by weight'),
+                row('SC', 'Segregate by count'),
+                row('C', 'Commingled (mix of CRV and non-CRV containers)'),
+                row('SP', 'Scrap only (non-CRV materials)'),
+                heading('OTHER COMMODITIES LEGEND'),
+                row('B1', 'Bimetal'),
+                row('P#2', 'HDPE (High Density Polyethylene)'),
+                row('P#3', 'PVC (Vinyl)'),
+                row('P#4', 'LDPE (Low Density Polyethylene)'),
+                row('P#5', 'PP (Polypropylene)'),
+                row('P#6', 'PS (Polystyrene)'),
+                row('P#7', 'Other (includes multilayer and unspecified resins)'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -3774,4 +4301,57 @@ class SignaturePointsPainter extends CustomPainter {
   @override
   bool shouldRepaint(SignaturePointsPainter oldDelegate) =>
       oldDelegate.points != points;
+}
+
+
+/// Compact pill used in the phone info strip.
+class _PhoneInfoChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final IconData? trailing;
+  final VoidCallback? onTap;
+  final bool highlight;
+  const _PhoneInfoChip({
+    required this.icon,
+    required this.label,
+    this.trailing,
+    this.onTap,
+    this.highlight = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = highlight ? AppColors.blueText : AppColors.navy;
+    return Material(
+      color: highlight ? AppColors.blueTint : AppColors.mist,
+      borderRadius: BorderRadius.circular(17),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(17),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: fg),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 220),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: fg),
+                ),
+              ),
+              if (trailing != null) ...[
+                const SizedBox(width: 2),
+                Icon(trailing, size: 16, color: fg),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'dart:math';
@@ -11,12 +13,20 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io';
 
 import '../utils/log_sheet_cell_label.dart';
 import '../utils/sheet_cell_numeric.dart';
 import '../widgets/dual_numeric_cell_editor.dart';
 import '../widgets/single_numeric_cell_editor.dart';
+import '../models/receipt.dart';
+import '../services/receipt_service.dart';
+import 'receipt_screen.dart';
+import '../config/brand.dart';
+import '../controllers/auth_controller.dart';
+
+part 'view_entry_phone.dart';
 
 // Custom signature point class to avoid Point constructor issues
 class SignaturePoint {
@@ -32,7 +42,17 @@ class SignaturePoint {
 class ViewEntryScreen extends ConsumerStatefulWidget {
   final String entryId;
 
-  const ViewEntryScreen({super.key, required this.entryId});
+  /// Optional deep link (e.g. from Admin › Receipts): open on this sheet and,
+  /// on phones, show this row (0-based).
+  final int? initialSheet;
+  final int? initialRow;
+
+  const ViewEntryScreen({
+    super.key,
+    required this.entryId,
+    this.initialSheet,
+    this.initialRow,
+  });
 
   @override
   ConsumerState<ViewEntryScreen> createState() => _ViewEntryScreenState();
@@ -56,8 +76,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   final ScrollController _horizontalController = ScrollController();
 
   /// Total width for header and grid (same as New Entry) so header and table align.
-  double get _totalGridWidth =>
-      4 * (colWidth * 4 + paidColWidth) + signColWidth + 32.0 + colWidth;
+  double get _totalGridWidth => _sheetGridWidth + receiptColWidth + 32.0;
+
+  /// The paper sheet itself (without the receipt column).
+  double get _sheetGridWidth => 4 * (colWidth * 4 + paidColWidth) + signColWidth + colWidth;
 
   // Map to store grid data for each sheet
   final Map<int, List<List<String>>> _sheetsGridData = {};
@@ -66,6 +88,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   bool _isLoading = true;
   bool _isReadOnly = true;
   bool _isSaving = false;
+
+  /// Entry info strip: hidden while scrolling down the sheet, shown again
+  /// when scrolling up or back at the top.
+  bool _infoVisible = true;
 
   // Map to store signature points for each sheet
   final Map<int, Map<String, List<SignaturePoint>>> _sheetsSignaturePoints = {};
@@ -77,11 +103,236 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
   String? _userEmail;
   DateTime? _createdAt;
 
+  /// Phone only: admins can choose the classic (paper grid) screen; saved on
+  /// the phone. iPad always shows the classic screen.
+  bool _phoneClassic = false;
+
+  /// Result of the last [_saveChanges] call (it reports errors itself).
+  bool _lastSaveOk = false;
+
+  /// The ?sheet=&row= deep link is acted on once, not on every view switch.
+  bool _deepLinkHandled = false;
+
   @override
   void initState() {
     super.initState();
     print('ViewEntryScreen: Initializing with entryId: ${widget.entryId}');
     _loadEntryData();
+    _loadPhoneViewPref();
+  }
+
+  // ── Phone view support ────────────────────────────────────────────────
+
+  Future<void> _loadPhoneViewPref() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final classic = prefs.getBool(_kPhoneClassicPrefKey) ?? false;
+      if (mounted && classic != _phoneClassic) {
+        setState(() => _phoneClassic = classic);
+      }
+    } catch (e) {
+      print('ViewEntryScreen: could not read view preference: $e');
+    }
+  }
+
+  Future<void> _setPhoneClassic(bool classic) async {
+    setState(() {
+      _phoneClassic = classic;
+      _isReadOnly = true;
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kPhoneClassicPrefKey, classic);
+    } catch (e) {
+      print('ViewEntryScreen: could not save view preference: $e');
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(classic
+              ? 'Classic view saved on this phone'
+              : 'New view saved on this phone'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// Receipt draft for a row of any sheet, from the sheet as it is now.
+  ReceiptData _receiptDraftFor(int sheet, int row) {
+    final grid = _sheetsGridData[sheet] ?? const <List<String>>[];
+    final cells = row < grid.length ? grid[row] : <String>[];
+    final key = '$row-21';
+    final points = _sheetsSignaturePoints[sheet]?[key] ?? const <SignaturePoint>[];
+    var name = _sheetsCustomerNames[sheet]?[key] ?? '';
+    if (name.isEmpty && cells.length > 21 && cells[21].trim().isNotEmpty && cells[21].trim() != 'Signed') {
+      name = cells[21].split('/').first.trim();
+    }
+    final entryDate = _entryData?['entryDate'] != null
+        ? DateTime.tryParse(_entryData!['entryDate'].toString()) ?? DateTime.now()
+        : DateTime.now();
+    return ReceiptData.fromGridRow(
+      cells: cells,
+      row: row,
+      sheetNumber: sheet,
+      date: entryDate,
+      customerName: name,
+      signature: points.map((p) => ReceiptSignaturePoint(p.dx, p.dy, p.type)).toList(),
+      certification: _entryData?['locationCertification']?.toString() ?? '',
+      recyclerName: _entryData?['locationName']?.toString() ?? '',
+      recyclerAddress: _entryData?['locationAddress']?.toString() ?? '',
+      locationId: _entryData?['location']?.toString(),
+      entryId: widget.entryId,
+    );
+  }
+
+  /// Receipts list for a given sheet (phone ⋯ menu).
+  Future<void> _showReceiptsForSheet(int sheet) async {
+    if (_currentSheetNumber != sheet && _sheetsGridData.containsKey(sheet)) {
+      setState(() {
+        _currentSheetNumber = sheet;
+        _initializeSheet(sheet);
+      });
+    }
+    await _showReceiptsSheet();
+  }
+
+  /// Opens (or issues) the receipt for a row of any sheet.
+  Future<void> _openReceiptForSheetRow(int sheet, int row) async {
+    if (_currentSheetNumber != sheet) {
+      setState(() {
+        _currentSheetNumber = sheet;
+        _initializeSheet(sheet);
+      });
+    }
+    await _openReceiptForRow(row);
+  }
+
+  /// Same totals row (index 15) as New Entry writes.
+  void _recalcTotalsRow(List<List<String>> grid) {
+    if (grid.length <= rowCount) return;
+    final totals = grid[rowCount];
+    for (int col = 0; col < totals.length; col++) {
+      if (col == 15) {
+        int count = 0;
+        for (int r = 0; r < rowCount; r++) {
+          if (col < grid[r].length && grid[r][col].trim().isNotEmpty) count++;
+        }
+        totals[col] = count > 0 ? 'Count: $count' : '';
+      } else if (col == 21) {
+        double grand = 0;
+        for (int r = 0; r < rowCount; r++) {
+          if (grid[r].length > 20) grand += parseSheetCellNumericValue(grid[r][20]);
+        }
+        totals[col] = grand.toStringAsFixed(2);
+      } else {
+        double sum = 0;
+        for (int r = 0; r < rowCount; r++) {
+          if (col < grid[r].length) sum += parseSheetCellNumericValue(grid[r][col]);
+        }
+        totals[col] = sum.toStringAsFixed(2);
+      }
+    }
+  }
+
+  /// Writes the phone editor's rows into the sheets and saves the entry the
+  /// same way the classic Save does. Restores everything if saving fails.
+  Future<bool> _applyPhoneEdits(Map<String, _RowEdit> edits) async {
+    final touched = edits.keys.map((k) => int.parse(k.split('-').first)).toSet();
+    final gridBackup = {
+      for (final s in touched)
+        if (_sheetsGridData[s] != null)
+          s: [for (final r in _sheetsGridData[s]!) List<String>.from(r)],
+    };
+    final namesBackup = {
+      for (final s in touched)
+        s: _sheetsCustomerNames[s] == null ? null : Map<String, String>.from(_sheetsCustomerNames[s]!),
+    };
+    final pointsBackup = {
+      for (final s in touched)
+        s: _sheetsSignaturePoints[s] == null
+            ? null
+            : Map<String, List<SignaturePoint>>.from(_sheetsSignaturePoints[s]!),
+    };
+
+    edits.forEach((key, edit) {
+      final sheet = int.parse(key.split('-').first);
+      final row = int.parse(key.split('-').last);
+      final grid = _sheetsGridData[sheet];
+      if (grid == null) return;
+
+      final touchesSign = edit.nameChanged || edit.points != null;
+      int width = 21;
+      for (final r in grid) {
+        width = max(width, r.length);
+      }
+      if (touchesSign) width = max(width, 22);
+      while (grid.length <= row) {
+        grid.add(List<String>.filled(width, '', growable: true));
+      }
+      // Every row keeps the same length so the flat Firestore values stay aligned.
+      for (int i = 0; i < grid.length; i++) {
+        if (grid[i].length < width) {
+          grid[i] = List<String>.from(grid[i])..addAll(List<String>.filled(width - grid[i].length, ''));
+        } else {
+          grid[i] = List<String>.from(grid[i]);
+        }
+      }
+
+      final cells = grid[row];
+      for (int c = 0; c < min(width, edit.cells.length); c++) {
+        if (c == 21) continue;
+        cells[c] = edit.cells[c];
+      }
+
+      final signKey = '$row-21';
+      if (edit.points != null) {
+        _sheetsSignaturePoints[sheet] ??= {};
+        _sheetsSignaturePoints[sheet]![signKey] = edit.points!;
+      }
+      if (edit.nameChanged) {
+        _sheetsCustomerNames[sheet] ??= {};
+        _sheetsCustomerNames[sheet]![signKey] = edit.name;
+      }
+      if (touchesSign && width > 21) {
+        final signed = cells[21].contains('Signed') ||
+            (_sheetsSignaturePoints[sheet]?[signKey]?.length ?? 0) > 1;
+        cells[21] = signed
+            ? (edit.name.isEmpty ? 'Signed' : '${edit.name}/Signed')
+            : edit.name;
+      }
+      _recalcTotalsRow(grid);
+    });
+
+    _initializeSheet(_currentSheetNumber);
+    _isReadOnly = false;
+    _lastSaveOk = false;
+    await _saveChanges();
+    final ok = _lastSaveOk;
+    if (!ok) {
+      gridBackup.forEach((s, g) => _sheetsGridData[s] = g);
+      namesBackup.forEach((s, m) {
+        if (m == null) {
+          _sheetsCustomerNames.remove(s);
+        } else {
+          _sheetsCustomerNames[s] = m;
+        }
+      });
+      pointsBackup.forEach((s, m) {
+        if (m == null) {
+          _sheetsSignaturePoints.remove(s);
+        } else {
+          _sheetsSignaturePoints[s] = m;
+        }
+      });
+      _initializeSheet(_currentSheetNumber);
+    }
+    if (mounted) {
+      setState(() => _isReadOnly = true);
+    } else {
+      _isReadOnly = true;
+    }
+    return ok;
   }
 
   Future<void> _loadEntryData() async {
@@ -228,6 +479,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       // Initialize the first sheet (keys are now in sorted/insertion order)
       if (_sheetsGridData.isNotEmpty) {
         _currentSheetNumber = (_sheetsGridData.keys.toList()..sort()).first;
+        final wanted = widget.initialSheet;
+        if (wanted != null && _sheetsGridData.containsKey(wanted)) {
+          _currentSheetNumber = wanted;
+        }
         _initializeSheet(_currentSheetNumber);
         print('ViewEntryScreen: Initialized sheet $_currentSheetNumber');
       }
@@ -235,6 +490,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       setState(() {
         _isLoading = false;
       });
+      _loadRowReceipts();
       print('ViewEntryScreen: Data loading completed successfully');
     } catch (e) {
       print('Error loading entry data: $e');
@@ -304,6 +560,163 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
         );
       }
     }
+  }
+
+  // ── Customer receipts ────────────────────────────────────────────────
+
+  /// Lists every signed customer row on the current sheet with its receipt
+  /// status; tapping a row opens (or issues) that customer's receipt.
+  Future<void> _showReceiptsSheet() async {
+    final sheet = _currentSheetNumber;
+    final names = _sheetsCustomerNames[sheet] ?? {};
+    final points = _sheetsSignaturePoints[sheet] ?? {};
+
+    final signedRows = <int>[];
+    for (int row = 0; row < rowCount; row++) {
+      final key = '$row-21';
+      if ((points[key]?.isNotEmpty ?? false) || (names[key]?.isNotEmpty ?? false)) {
+        signedRows.add(row);
+      }
+    }
+
+    Map<String, ReceiptData> existing = {};
+    try {
+      final list = await ReceiptService.forEntry(widget.entryId);
+      for (final r in list) {
+        existing['${r.sheetNumber}-${r.row}'] = r;
+      }
+    } catch (e) {
+      print('Error loading receipts: $e');
+    }
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        if (signedRows.isEmpty) {
+          return SizedBox(
+            height: 200,
+            child: Center(
+              child: Text(
+                'No signed customers on sheet $sheet yet.',
+                style: theme.textTheme.bodyLarge,
+              ),
+            ),
+          );
+        }
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Row(
+                  children: [
+                    Text('Receipts · Sheet $sheet',
+                        style: theme.textTheme.titleLarge),
+                    const Spacer(),
+                    Text('${signedRows.length} customer(s)',
+                        style: theme.textTheme.bodySmall),
+                  ],
+                ),
+              ),
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: signedRows.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final row = signedRows[i];
+                    final key = '$row-21';
+                    final name = names[key] ?? 'Customer';
+                    final cells = row < _currentGridData.length
+                        ? _currentGridData[row]
+                        : const <String>[];
+                    final total = cells.length > 20
+                        ? parseSheetCellNumericValue(cells[20])
+                        : 0.0;
+                    final r = existing['$sheet-$row'];
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: theme.colorScheme.primary,
+                        foregroundColor: Colors.white,
+                        child: Text('${row + 1}'),
+                      ),
+                      title: Text(name),
+                      subtitle: Text(
+                        r == null
+                            ? 'No receipt issued yet'
+                            : 'Receipt #${r.receiptNumberLabel}'
+                                '${r.sms.requested ? ' · Text: ${r.sms.status}' : ''}'
+                                '${r.email.requested ? ' · Email: ${r.email.status}' : ''}'
+                                '${r.printed ? ' · Printed' : ''}',
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('\$${total.toStringAsFixed(2)}',
+                              style: theme.textTheme.titleMedium),
+                          const SizedBox(width: 8),
+                          const Icon(Icons.chevron_right),
+                        ],
+                      ),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        _openReceiptForRow(row, existing: r);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openReceiptForRow(int row, {ReceiptData? existing}) async {
+    if (existing?.id != null) {
+      await openReceiptScreen(context, receiptId: existing!.id);
+      return;
+    }
+    final sheet = _currentSheetNumber;
+    final key = '$row-21';
+    final cells = row < _currentGridData.length ? _currentGridData[row] : <String>[];
+    final rowTotal = cells.length > 20 ? parseSheetCellNumericValue(cells[20]) : 0.0;
+    if (rowTotal <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('This row has no amount paid, so no receipt was issued.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+    final points = _sheetsSignaturePoints[sheet]?[key] ?? const <SignaturePoint>[];
+    final name = _sheetsCustomerNames[sheet]?[key] ?? '';
+    final entryDate = _entryData?['entryDate'] != null
+        ? DateTime.tryParse(_entryData!['entryDate'].toString()) ?? DateTime.now()
+        : DateTime.now();
+
+    final draft = ReceiptData.fromGridRow(
+      cells: cells,
+      row: row,
+      sheetNumber: sheet,
+      date: entryDate,
+      customerName: name,
+      signature: points
+          .map((p) => ReceiptSignaturePoint(p.dx, p.dy, p.type))
+          .toList(),
+      certification: _entryData?['locationCertification']?.toString() ?? '',
+      recyclerName: _entryData?['locationName']?.toString() ?? '',
+      recyclerAddress: _entryData?['locationAddress']?.toString() ?? '',
+      locationId: _entryData?['location']?.toString(),
+      entryId: widget.entryId,
+    );
+    await openReceiptScreen(context, draft: draft);
   }
 
   // Helper method to convert signature points to PDF image
@@ -1046,13 +1459,20 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       context.push(
         '/customer',
         extra: {
-          'onSignatureComplete': (Uint8List signatureBytes) {
+          'onSignatureComplete': (Uint8List signatureBytes, String customerName) {
             setState(() {
-              _currentGridData[row][col] = 'Signed';
+              if (col < _currentGridData[row].length) {
+                _currentGridData[row][col] =
+                    customerName.isEmpty ? 'Signed' : '$customerName/Signed';
+              }
             });
           },
-          'onSignaturePointsComplete': (List<Point> signaturePoints) {
+          'onSignaturePointsComplete': (List<Point> signaturePoints, String customerName) {
             setState(() {
+              if (customerName.isNotEmpty) {
+                _sheetsCustomerNames[_currentSheetNumber] ??= {};
+                _sheetsCustomerNames[_currentSheetNumber]!['$row-$col'] = customerName;
+              }
               _sheetsSignaturePoints[_currentSheetNumber] ??= {};
               _sheetsSignaturePoints[_currentSheetNumber]!['$row-$col'] =
                   signaturePoints
@@ -1332,6 +1752,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
             'sheets': updatedSheets,
             'updatedAt': DateTime.now().toIso8601String(),
           });
+      _lastSaveOk = true;
 
       // Save signature points to subcollections if any exist
       for (final entry in _sheetsSignaturePoints.entries) {
@@ -1362,6 +1783,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
         );
       }
     } catch (e) {
+      _lastSaveOk = false;
       print('Error saving changes: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1380,6 +1802,113 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     }
   }
 
+  bool _onSheetScroll(UserScrollNotification n) {
+    if (n.metrics.axis != Axis.vertical) return false;
+    final atTop = n.metrics.pixels <= n.metrics.minScrollExtent + 4;
+    bool? show;
+    if (n.direction == ScrollDirection.reverse && !atTop) show = false;
+    if (n.direction == ScrollDirection.forward || atTop) show = true;
+    if (show != null && show != _infoVisible) setState(() => _infoVisible = show!);
+    return false;
+  }
+
+  /// Compact entry strip: what/where/when on the left, status + Approve right.
+  Widget _buildEntryInfoBar() {
+    final isApproved = _entryData?['approved'] == true;
+    final entryDate = DateTime.tryParse(_entryData?['entryDate']?.toString() ?? '') ?? _createdAt;
+    final location = [
+      _entryData?['locationName']?.toString() ?? '',
+      _entryData?['locationAddress']?.toString() ?? '',
+    ].firstWhere((v) => v.isNotEmpty, orElse: () => '');
+    final shortId = widget.entryId.length > 8 ? widget.entryId.substring(0, 8) : widget.entryId;
+    final meta = [
+      'Sheet $_currentSheetNumber of ${_sheetsGridData.length}',
+      if (_createdAt != null) 'Created ${DateFormat('MMM d, h:mm a').format(_createdAt!)}',
+      'ID $shortId',
+    ].join('  ·  ');
+    final narrow = MediaQuery.sizeOf(context).width < 600;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+      padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: AppColors.cream,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(Icons.assignment_outlined, size: 20, color: AppColors.forest),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  [
+                    if (entryDate != null) DateFormat('EEE, MMM d, yyyy').format(entryDate),
+                    if (location.isNotEmpty) location,
+                  ].join('  ·  '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.navy),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  meta,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: AppColors.slate),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: isApproved ? AppColors.greenTint : AppColors.amberTint,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              isApproved ? 'Approved' : 'Pending',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: isApproved ? AppColors.greenText : AppColors.amberText,
+              ),
+            ),
+          ),
+          if (!isApproved) ...[
+            const SizedBox(width: 8),
+            SizedBox(
+              height: 36,
+              child: FilledButton.icon(
+                onPressed: _approveEntry,
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.green,
+                  padding: EdgeInsets.symmetric(horizontal: narrow ? 10 : 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+                icon: const Icon(Icons.check, size: 18),
+                label: Text(narrow ? 'Approve' : 'Approve entry', style: const TextStyle(fontSize: 13)),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -1395,10 +1924,22 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
       );
     }
 
+    final isPhone = _isPhoneLayout(context);
+    final isAdmin = ref.watch(currentUserRoleProvider).valueOrNull == 'admin';
+    if (isPhone && !(isAdmin && _phoneClassic)) {
+      return _PhoneEntryView(host: this, isAdmin: isAdmin);
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Text(_isReadOnly ? 'View Entry' : 'Edit Entry'),
         actions: [
+          if (_entryData != null)
+            IconButton(
+              icon: const Icon(Icons.receipt_long),
+              tooltip: 'Customer receipts',
+              onPressed: _showReceiptsSheet,
+            ),
           if (_entryData != null)
             IconButton(
               icon: const Icon(Icons.download),
@@ -1410,110 +1951,43 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
               icon: Icon(_isReadOnly ? Icons.edit : Icons.save),
               onPressed: _isReadOnly ? _toggleEditMode : _saveChanges,
             ),
+          // Phone + admin: ⋯ menu with the Classic view switch.
+          if (_entryData != null && isPhone && isAdmin)
+            IconButton(
+              icon: const Icon(Icons.more_vert),
+              tooltip: 'More options',
+              onPressed: () => _showViewEntryMenu(
+                context,
+                this,
+                classic: true,
+                isAdmin: true,
+                canSwitch: _isReadOnly,
+                onEdit: _isReadOnly ? _toggleEditMode : null,
+              ),
+            ),
         ],
       ),
       body: SafeArea(
         child: Column(
           children: [
-            // Entry info header
+            // Entry info: one compact strip that slides away while scrolling
+            // down the sheet and comes back when scrolling up.
             if (_entryData != null)
-              Builder(
-                builder: (context) {
-                  final isApproved = _entryData?['approved'] == true;
-                  return Container(
-                    padding: const EdgeInsets.all(16),
-                    margin: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.05),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        // Left: Entry ID, Created Date, Sheet count in a column
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                'Entry ID: ${widget.entryId.length > 8 ? '${widget.entryId.substring(0, 8)}...' : widget.entryId}',
-                                style: Theme.of(context).textTheme.bodyMedium
-                                    ?.copyWith(fontWeight: FontWeight.w500),
-                              ),
-                              if (_createdAt != null) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  'Created: ${DateFormat('MM/dd/yyyy HH:mm').format(_createdAt!)}',
-                                  style: Theme.of(context).textTheme.bodySmall
-                                      ?.copyWith(color: Colors.grey[600]),
-                                ),
-                              ],
-                              const SizedBox(height: 4),
-                              Text(
-                                'Sheets: ${_sheetsGridData.length}',
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(color: Colors.grey[600]),
-                              ),
-                            ],
-                          ),
-                        ),
-                        // Right: Pending tag and Approve button
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: isApproved ? Colors.green[100] : Colors.orange[100],
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                  color: isApproved ? Colors.green : Colors.orange,
-                                  width: 1,
-                                ),
-                              ),
-                              child: Text(
-                                isApproved ? 'APPROVED' : 'PENDING',
-                                style: TextStyle(
-                                  color: isApproved ? Colors.green[800] : Colors.orange[800],
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                            if (!isApproved) ...[
-                              const SizedBox(height: 8),
-                              ElevatedButton.icon(
-                                onPressed: () => _approveEntry(),
-                                icon: const Icon(Icons.check, size: 16),
-                                label: const Text('Approve'),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.green,
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                  minimumSize: Size.zero,
-                                  textStyle: const TextStyle(fontSize: 12),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ],
-                    ),
-                  );
-                },
+              ClipRect(
+                child: AnimatedAlign(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  alignment: Alignment.topCenter,
+                  heightFactor: _infoVisible ? 1 : 0,
+                  child: _buildEntryInfoBar(),
+                ),
               ),
 
             // Main scrollable content area - header and grid in same horizontal scroll (like New Entry)
             Expanded(
-              child: SingleChildScrollView(
+              child: NotificationListener<UserScrollNotification>(
+                onNotification: _onSheetScroll,
+                child: SingleChildScrollView(
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   controller: _horizontalController,
@@ -1532,6 +2006,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                     ),
                   ),
                 ),
+              ),
               ),
             ),
 
@@ -1867,9 +2342,148 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     );
   }
 
+  /// The classic sheet grid followed by the receipt column.
   Widget _buildGrid() {
     return SizedBox(
       width: _totalGridWidth,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSheetGrid(),
+          _buildReceiptColumn(),
+        ],
+      ),
+    );
+  }
+
+  // ── Receipt column (classic grid only; the PDF is unchanged) ──────────
+
+  static const double receiptColWidth = 130;
+
+  /// Header (same height as the grid's three header rows) + one cell per row.
+  Widget _buildReceiptColumn() {
+    return SizedBox(
+      width: receiptColWidth,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            height: 132,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.grey[300],
+              border: Border.all(color: Colors.black, width: 1),
+            ),
+            child: const Text(
+              'RECEIPT',
+              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14, letterSpacing: 1.2),
+            ),
+          ),
+          for (int row = 0; row < rowCount; row++) _buildReceiptCell(row),
+        ],
+      ),
+    );
+  }
+
+  Widget _receiptCellBox({required Widget child, VoidCallback? onTap, Color color = Colors.white}) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        width: receiptColWidth,
+        height: 48,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: color,
+          border: Border.all(color: Colors.black, width: 1),
+        ),
+        child: child,
+      ),
+    );
+  }
+
+  /// Receipt number + delivery status, or "Issue" for a signed, paid row.
+  Widget _receiptCellContent(ReceiptData? r, {required bool canIssue}) {
+    if (r != null) {
+      final status = r.sms.requested
+          ? (r.sms.status == 'delivered'
+              ? 'Texted'
+              : (r.sms.status == 'failed' || r.sms.status == 'undelivered' ? 'Text failed' : 'Texting'))
+          : (r.printed ? 'Printed' : 'Issued');
+      final failed = status == 'Text failed';
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            '#${r.receiptNumberLabel}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: AppColors.forest),
+          ),
+          Text(
+            status,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: failed ? AppColors.redText : AppColors.slate,
+            ),
+          ),
+        ],
+      );
+    }
+    if (canIssue) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: AppColors.amberTint,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.amberLine),
+        ),
+        child: const Text('Issue',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.amberText)),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  /// Receipts for this entry, keyed "sheet-row".
+  Map<String, ReceiptData> _rowReceipts = {};
+
+  Future<void> _loadRowReceipts() async {
+    try {
+      final list = await ReceiptService.forEntry(widget.entryId);
+      if (!mounted) return;
+      setState(() {
+        _rowReceipts = {for (final r in list) '${r.sheetNumber}-${r.row}': r};
+      });
+    } catch (e) {
+      print('ViewEntryScreen: receipts not loaded: $e');
+    }
+  }
+
+  Widget _buildReceiptCell(int row) {
+    final r = _rowReceipts['$_currentSheetNumber-$row'];
+    final cells = row < _currentGridData.length ? _currentGridData[row] : const <String>[];
+    final signed = (_sheetsSignaturePoints[_currentSheetNumber]?['$row-21']?.length ?? 0) > 1 ||
+        (cells.length > 21 && cells[21].contains('Signed'));
+    final total = cells.length > 20 ? parseSheetCellNumericValue(cells[20]) : 0.0;
+    final canIssue = r == null && signed && total > 0;
+    return _receiptCellBox(
+      color: r != null ? const Color(0xFFF1F8EC) : Colors.white,
+      onTap: r == null && !canIssue
+          ? null
+          : () async {
+              await _openReceiptForRow(row, existing: r);
+              if (mounted) _loadRowReceipts();
+            },
+      child: _receiptCellContent(r, canIssue: canIssue),
+    );
+  }
+
+  Widget _buildSheetGrid() {
+    return SizedBox(
+      width: _sheetGridWidth,
       child: Align(
         alignment: Alignment.centerLeft,
         child: Column(
@@ -3176,7 +3790,16 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
 class SignaturePointsPainter extends CustomPainter {
   final List<SignaturePoint> points;
 
-  SignaturePointsPainter(this.points);
+  /// Defaults keep the classic sheet unchanged; the phone view passes a
+  /// lighter colour and thinner stroke for its small thumbnails.
+  final Color color;
+  final double strokeWidth;
+
+  SignaturePointsPainter(
+    this.points, {
+    this.color = Colors.black,
+    this.strokeWidth = 2.0,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -3184,9 +3807,10 @@ class SignaturePointsPainter extends CustomPainter {
 
     final paint =
         Paint()
-          ..color = Colors.black
-          ..strokeWidth = 2.0
-          ..strokeCap = StrokeCap.round;
+          ..color = color
+          ..strokeWidth = strokeWidth
+          ..strokeCap = StrokeCap.round
+          ..isAntiAlias = true;
 
     // Find the bounding box of the signature points to scale it correctly
     double minX = double.infinity;
@@ -3234,6 +3858,8 @@ class SignaturePointsPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(SignaturePointsPainter oldDelegate) =>
-      oldDelegate.points != points;
+      oldDelegate.points != points ||
+      oldDelegate.color != color ||
+      oldDelegate.strokeWidth != strokeWidth;
 }
 

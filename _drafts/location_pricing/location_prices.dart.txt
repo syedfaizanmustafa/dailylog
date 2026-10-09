@@ -1,0 +1,177 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+
+/// $/lb prices a location pays for the three auto-priced materials.
+/// New Entry multiplies the SW weight by these to fill Total Paid.
+/// "Other commodities" stay priced by hand on the sheet.
+///
+/// Stored on `locations/{id}`:
+///   prices:       {aluminum, glass, pete, updatedAt, updatedByUid, updatedByName}
+///   priceHistory: [{at, byUid, byName, aluminum, glass, pete, previous}]  (newest first, max 30)
+class LocationPrices {
+  final double aluminum;
+  final double glass;
+  final double pete;
+  final DateTime? updatedAt;
+  final String updatedByName;
+
+  const LocationPrices({
+    required this.aluminum,
+    required this.glass,
+    required this.pete,
+    this.updatedAt,
+    this.updatedByName = '',
+  });
+
+  /// The prices New Entry used before per-location prices existed.
+  static const standard = LocationPrices(aluminum: 1.80, glass: 0.101, pete: 1.46);
+
+  /// Allowed range per material; anything outside is rejected as a typo.
+  static const Map<String, (double, double)> limits = {
+    'aluminum': (0.10, 10.00),
+    'glass': (0.01, 1.00),
+    'pete': (0.10, 10.00),
+  };
+
+  static const Map<String, String> labels = {
+    'aluminum': 'Aluminum',
+    'glass': 'Glass',
+    'pete': 'PETE plastic',
+  };
+
+  /// A change bigger than this (either way) asks for an extra check.
+  static const double bigChange = 0.25;
+
+  double operator [](String key) => switch (key) {
+        'aluminum' => aluminum,
+        'glass' => glass,
+        _ => pete,
+      };
+
+  /// Valid prices from Firestore, or null if missing / incomplete / out of
+  /// range (never half-apply a bad price set).
+  static LocationPrices? fromMap(dynamic raw) {
+    if (raw is! Map) return null;
+    double? read(String k) {
+      final v = raw[k];
+      final d = v is num ? v.toDouble() : double.tryParse('$v');
+      if (d == null) return null;
+      final (lo, hi) = limits[k]!;
+      return d >= lo && d <= hi ? d : null;
+    }
+
+    final a = read('aluminum'), g = read('glass'), p = read('pete');
+    if (a == null || g == null || p == null) return null;
+    final at = raw['updatedAt'];
+    return LocationPrices(
+      aluminum: a,
+      glass: g,
+      pete: p,
+      updatedAt: at is Timestamp ? at.toDate() : DateTime.tryParse('${at ?? ''}'),
+      updatedByName: raw['updatedByName']?.toString() ?? '',
+    );
+  }
+
+  Map<String, double> toPlainMap() => {'aluminum': aluminum, 'glass': glass, 'pete': pete};
+
+  bool sameAs(LocationPrices o) =>
+      (aluminum - o.aluminum).abs() < 1e-9 && (glass - o.glass).abs() < 1e-9 && (pete - o.pete).abs() < 1e-9;
+
+  /// Short id of these exact prices (used to remember "keep sheet prices").
+  String get signature => '${aluminum}_${glass}_$pete';
+
+  /// "$1.80", "$0.101", "$1.825"
+  static String fmt(double v) => '\$${NumberFormat('0.00##').format(v)}';
+
+  /// Parses what an admin typed ("1.8", "$1.80", ".101"). Returns the value
+  /// or an error message.
+  static (double?, String?) parse(String key, String text) {
+    final t = text.trim().replaceAll('\$', '').replaceAll(' ', '');
+    if (t.isEmpty) return (null, 'Enter a price');
+    if (!RegExp(r'^\d*\.?\d+$|^\d+\.$').hasMatch(t)) return (null, 'Numbers only, e.g. 1.80');
+    final dot = t.indexOf('.');
+    if (dot >= 0 && t.length - dot - 1 > 4) return (null, 'At most 4 decimals');
+    final v = double.tryParse(t);
+    if (v == null) return (null, 'Numbers only, e.g. 1.80');
+    final (lo, hi) = limits[key]!;
+    if (v < lo || v > hi) return (null, 'Must be between ${fmt(lo)} and ${fmt(hi)}');
+    return (v, null);
+  }
+
+  /// Saves new prices and adds them to the history in one transaction.
+  static Future<void> save({
+    required String locationId,
+    required LocationPrices prices,
+    required String byUid,
+    required String byName,
+  }) async {
+    final ref = FirebaseFirestore.instance.collection('locations').doc(locationId);
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final data = snap.data() ?? const <String, dynamic>{};
+      final old = fromMap(data['prices']);
+      final history = <Map<String, dynamic>>[
+        for (final h in (data['priceHistory'] as List?) ?? const [])
+          if (h is Map) Map<String, dynamic>.from(h),
+      ];
+      final now = DateTime.now().toIso8601String();
+      history.insert(0, {
+        'at': now,
+        'byUid': byUid,
+        'byName': byName,
+        ...prices.toPlainMap(),
+        if (old != null) 'previous': old.toPlainMap(),
+      });
+      tx.update(ref, {
+        'prices': {
+          ...prices.toPlainMap(),
+          'updatedAt': now,
+          'updatedByUid': byUid,
+          'updatedByName': byName,
+        },
+        'priceHistory': history.take(30).toList(),
+      });
+    });
+  }
+}
+
+/// One entry of a location's price history.
+class PriceChange {
+  final DateTime at;
+  final String byName;
+  final LocationPrices prices;
+  final LocationPrices? previous;
+  const PriceChange(this.at, this.byName, this.prices, this.previous);
+
+  static List<PriceChange> listFrom(dynamic raw) {
+    if (raw is! List) return const [];
+    final out = <PriceChange>[];
+    for (final h in raw) {
+      if (h is! Map) continue;
+      final p = LocationPrices.fromMap(h);
+      final at = DateTime.tryParse('${h['at'] ?? ''}');
+      if (p == null || at == null) continue;
+      out.add(PriceChange(at, h['byName']?.toString() ?? '', p, LocationPrices.fromMap(h['previous'])));
+    }
+    return out;
+  }
+}
+
+/// Live prices of one location (null = not set yet).
+final locationPricesProvider = StreamProvider.family<LocationPrices?, String>((ref, locationId) {
+  return FirebaseFirestore.instance
+      .collection('locations')
+      .doc(locationId)
+      .snapshots()
+      .map((d) => LocationPrices.fromMap(d.data()?['prices']));
+});
+
+/// Prices + history of every location (admin Locations screen).
+final allLocationPricesProvider =
+    StreamProvider<Map<String, (LocationPrices?, List<PriceChange>)>>((ref) {
+  return FirebaseFirestore.instance.collection('locations').snapshots().map((snap) => {
+        for (final d in snap.docs)
+          d.id: (LocationPrices.fromMap(d.data()['prices']), PriceChange.listFrom(d.data()['priceHistory'])),
+      });
+});

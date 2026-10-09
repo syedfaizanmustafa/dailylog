@@ -43,3 +43,13 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local working files (not part of the app)
+_backup_ui_*/
+_icon_work/
+*.zip
+
+# Firebase functions dependencies
+camacho_website/functions/node_modules/
+camacho_website/.firebase/
+.fuse_hidden*

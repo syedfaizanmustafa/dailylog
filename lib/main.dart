@@ -12,26 +12,11 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    print('Initializing Firebase...');
-    print('Current platform: ${defaultTargetPlatform}');
-    print('Is web: $kIsWeb');
-
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
-    print('Firebase initialized successfully');
   } catch (e) {
-    print('Firebase initialization failed: $e');
-    print('Error type: ${e.runtimeType}');
-    print('Error stack trace: ${e.toString()}');
-
-    // Show a user-friendly error message
-    if (kIsWeb) {
-      print(
-        'Firebase initialization failed on web. Please check your web configuration.',
-      );
-    }
-
+    debugPrint('Firebase initialization failed: $e');
     // Continue with app startup even if Firebase fails
     // The app will handle Firebase errors gracefully in the UI
   }
@@ -49,7 +34,8 @@ class MyApp extends ConsumerWidget {
     ref.watch(appControllerProvider);
 
     return MaterialApp.router(
-      title: 'Record App',
+      title: 'Camacho Daily Log',
+      debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       routerConfig: router,
     );
