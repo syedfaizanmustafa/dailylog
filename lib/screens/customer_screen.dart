@@ -315,35 +315,35 @@ class _CustomerScreenState extends State<CustomerScreen> {
                     wide: c.maxWidth >= 640,
                   );
 
-                  // Normal case: the signature pad takes all the height the
-                  // cards and buttons don't need.
-                  if (c.maxHeight >= 520) {
-                    return Padding(
-                      padding: EdgeInsets.fromLTRB(hPad, 20, hPad, 20),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Expanded(child: pad),
-                          const SizedBox(height: 16),
-                          details,
-                          const SizedBox(height: 16),
-                          actions,
-                        ],
-                      ),
-                    );
-                  }
-                  // Short (keyboard up on a small iPad): scroll instead of squeezing.
+                  // One widget tree for every height. Swapping layouts when
+                  // the keyboard opens rebuilt the name field, which dropped
+                  // focus and closed the keyboard straight away. Now the
+                  // content just keeps a minimum height and scrolls when the
+                  // keyboard leaves less room than that.
+                  const minContentHeight = 520.0;
+                  final fits = c.maxHeight >= minContentHeight;
                   return SingleChildScrollView(
-                    padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        SizedBox(height: 260, child: pad),
-                        const SizedBox(height: 16),
-                        details,
-                        const SizedBox(height: 16),
-                        actions,
-                      ],
+                    // No scrolling when everything fits, so signing strokes
+                    // never move the page. Only the physics changes, so the
+                    // fields below keep their focus.
+                    physics: fits
+                        ? const NeverScrollableScrollPhysics()
+                        : const ClampingScrollPhysics(),
+                    child: SizedBox(
+                      height: fits ? c.maxHeight : minContentHeight,
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(hPad, 20, hPad, 20),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Expanded(child: pad),
+                            const SizedBox(height: 16),
+                            details,
+                            const SizedBox(height: 16),
+                            actions,
+                          ],
+                        ),
+                      ),
                     ),
                   );
                 },
@@ -356,7 +356,10 @@ class _CustomerScreenState extends State<CustomerScreen> {
   }
 
   Widget _buildPhoneBody(BoxConstraints c, Duration quick) {
-    final landscape = c.maxWidth > c.maxHeight;
+    // Orientation from the screen, not the space left above the keyboard,
+    // so opening the name sheet doesn't flip the layout behind it.
+    final landscape =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
     final pad = _SignaturePadCard(
       controller: _signatureController,
       hasStrokes: _hasStrokes,
