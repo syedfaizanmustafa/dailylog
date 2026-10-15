@@ -645,11 +645,14 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
     return 'Unknown location';
   }
 
-  /// Date shown on a customer row: when its receipt was issued (date and
-  /// time) if there is one, otherwise the log sheet's date.
+  /// Date shown on a customer row: when its receipt was issued if there is
+  /// one, otherwise the log sheet's date. Only admins see the time.
   String _rowDate(_PRow r, {bool long = false}) {
     final issued = _receipts[r.key]?.createdAt?.toLocal();
     if (issued != null) {
+      if (!widget.isAdmin) {
+        return DateFormat(long ? 'MMM d, yyyy' : 'MMM d').format(issued);
+      }
       return DateFormat(long ? 'MMM d, yyyy · h:mm a' : 'MMM d · h:mm a').format(issued);
     }
     return DateFormat('MMM d, yyyy').format(_entryDate);
