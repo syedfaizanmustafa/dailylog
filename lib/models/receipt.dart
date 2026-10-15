@@ -38,7 +38,11 @@ enum ReceiptMaterial {
   ldpe('#4 (LDPE)'),
   pp('#5 (PP)'),
   ps('#6 (PS)'),
-  other('#7 (OTHER)**');
+  other('#7 (OTHER)**'),
+
+  /// Non-CRV scrap. Only printed on receipts that have scrap, and may be
+  /// paid $0.00.
+  scrap('SCRAP');
 
   final String label;
   const ReceiptMaterial(this.label);
@@ -58,6 +62,8 @@ enum ReceiptMaterial {
         return ReceiptMaterial.pp;
       case 'P#6':
         return ReceiptMaterial.ps;
+      case 'SCRAP':
+        return ReceiptMaterial.scrap;
       default:
         // P#7, WDS, MLP, BIB, CC and anything unknown → "#7 (OTHER)"
         return ReceiptMaterial.other;

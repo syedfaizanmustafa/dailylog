@@ -785,6 +785,11 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                   _buildCommodityOption(context, 'MLP', 'Multi layer pouch'),
                   _buildCommodityOption(context, 'BIB', 'Bag-in-box'),
                   _buildCommodityOption(context, 'CC', 'Cardboard Carton'),
+                  _buildCommodityOption(
+                    context,
+                    'SCRAP',
+                    'Scrap (non-CRV, can be paid \$0.00)',
+                  ),
                 ],
               ),
             ),
@@ -1130,6 +1135,16 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
 
   // ── Customer receipts ────────────────────────────────────────────────
 
+  /// True when anything was entered in [cells] (a weight, count or code),
+  /// even if it paid $0.00 (e.g. scrap).
+  bool _rowHasGoods(List<String> cells) {
+    const cols = [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 15, 16, 17, 18];
+    for (final c in cols) {
+      if (c < cells.length && cells[c].trim().isNotEmpty) return true;
+    }
+    return false;
+  }
+
   /// Opens the receipt for [row] of the current sheet (issuing one if the
   /// customer has signed but no receipt exists yet).
   Future<void> _openReceiptForRow(int row) async {
@@ -1158,8 +1173,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     final rowTotal = _currentGridData[row].length > 20
         ? _parseCellValue(_currentGridData[row][20])
         : 0.0;
-    if (rowTotal <= 0) {
-      // Don't burn a receipt number on an empty row.
+    if (rowTotal <= 0 && !_rowHasGoods(_currentGridData[row])) {
+      // Don't burn a receipt number on an empty row. $0.00 is fine when
+      // something was brought in (scrap).
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -1575,6 +1591,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                   ),
                   Text(
                     'P#7  Other (Includes multilayer and unspecified resins)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'SCRAP  Scrap (non-CRV, can be paid \$0.00)',
                     style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
                   ),
                 ],
@@ -4230,6 +4250,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                 row('P#5', 'PP (Polypropylene)'),
                 row('P#6', 'PS (Polystyrene)'),
                 row('P#7', 'Other (includes multilayer and unspecified resins)'),
+                row('SCRAP', 'Scrap (non-CRV, can be paid \$0.00)'),
               ],
             ),
           ),

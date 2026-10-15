@@ -63,6 +63,7 @@ const List<(String, String)> _kOtherCodes = [
   ('MLP', 'Multi layer pouch'),
   ('BIB', 'Bag-in-box'),
   ('CC', 'Cardboard carton'),
+  ('SCRAP', 'Scrap'),
 ];
 
 String _cellAt(List<String> r, int c) => c < r.length ? r[c].trim() : '';

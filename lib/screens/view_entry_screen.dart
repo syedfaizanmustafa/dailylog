@@ -686,10 +686,15 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
     final key = '$row-21';
     final cells = row < _currentGridData.length ? _currentGridData[row] : <String>[];
     final rowTotal = cells.length > 20 ? parseSheetCellNumericValue(cells[20]) : 0.0;
-    if (rowTotal <= 0) {
+    // $0.00 is fine when something was brought in (scrap); only skip rows
+    // with nothing entered at all.
+    const goodsCols = [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 15, 16, 17, 18];
+    final hasGoods =
+        goodsCols.any((c) => c < cells.length && cells[c].trim().isNotEmpty);
+    if (rowTotal <= 0 && !hasGoods) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('This row has no amount paid, so no receipt was issued.'),
+          content: Text('This row has nothing entered, so no receipt was issued.'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -1000,7 +1005,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                 pw.SizedBox(height: 2),
                 pw.Padding(
                   padding: const pw.EdgeInsets.only(left: leftPaddingUnderLabel),
-                  child: pw.Text('B1 BIMETAL  P#2 HDPE  P#3 PVC  P#4 LDPE  P#5 PP  P#6 PS  P#7 Other', style: const pw.TextStyle(fontSize: 5)),
+                  child: pw.Text('B1 BIMETAL  P#2 HDPE  P#3 PVC  P#4 LDPE  P#5 PP  P#6 PS  P#7 Other  SCRAP Scrap', style: const pw.TextStyle(fontSize: 5)),
                 ),
                 pw.SizedBox(height: 2),
                 pw.Padding(
@@ -2330,6 +2335,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
                   ),
                   Text(
                     'P#7  Other (Includes multilayer and unspecified resins)',
+                    style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
+                  ),
+                  Text(
+                    'SCRAP  Scrap (non-CRV, can be paid \$0.00)',
                     style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
                   ),
                 ],

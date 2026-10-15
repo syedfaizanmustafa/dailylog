@@ -236,6 +236,8 @@ class ReceiptPdfService {
         ],
       ),
       for (final m in ReceiptMaterial.values)
+        // The scrap row is extra to the state form: only print it when used.
+        if (m != ReceiptMaterial.scrap || byMaterial.containsKey(m))
         pw.TableRow(
           children: [
             cell(m.label, align: pw.TextAlign.left, strong: true),
