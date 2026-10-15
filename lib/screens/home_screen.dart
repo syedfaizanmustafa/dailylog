@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -49,59 +48,6 @@ final draftSummaryProvider = FutureProvider<DraftSummary?>((ref) async {
   } catch (_) {
     return const DraftSummary(sheets: 1, currentSheet: 1, signedCustomers: 0);
   }
-});
-
-class HomeStats {
-  final int customers;
-  final double paid;
-  final int texted;
-  final int sheetsThisWeek;
-  const HomeStats(this.customers, this.paid, this.texted, this.sheetsThisWeek);
-}
-
-/// Today's numbers for the selected yard: customers / paid / texted come from
-/// issued receipts (one per signed customer); sheets from this week's entries.
-final homeStatsProvider =
-    FutureProvider.family<HomeStats, String?>((ref, locationId) async {
-  final db = FirebaseFirestore.instance;
-  final now = DateTime.now();
-  final todayKey = DateFormat('yyyy-MM-dd').format(now);
-  final monday = now.subtract(Duration(days: now.weekday - 1));
-  final mondayKey = DateFormat('yyyy-MM-dd').format(monday);
-
-  var customers = 0;
-  var paid = 0.0;
-  var texted = 0;
-  try {
-    final receipts = await db
-        .collection('receipts')
-        .where('entryDateKey', isEqualTo: todayKey)
-        .get();
-    for (final doc in receipts.docs) {
-      final r = doc.data();
-      if (locationId != null && r['locationId'] != locationId) continue;
-      customers++;
-      paid += (r['grandTotal'] as num?)?.toDouble() ?? 0;
-      final sms = r['sms'];
-      if (sms is Map && sms['requested'] == true) texted++;
-    }
-  } catch (_) {}
-
-  var sheets = 0;
-  try {
-    final entries = await db
-        .collection('entries')
-        .where('entryDateKey', isGreaterThanOrEqualTo: mondayKey)
-        .get();
-    for (final doc in entries.docs) {
-      final e = doc.data();
-      if (locationId != null && e['location'] != locationId) continue;
-      final s = e['sheets'];
-      sheets += s is Map && s.isNotEmpty ? s.length : 1;
-    }
-  } catch (_) {}
-
-  return HomeStats(customers, paid, texted, sheets);
 });
 
 // ── Screen ────────────────────────────────────────────────────────────────
@@ -167,7 +113,6 @@ class HomeScreen extends ConsumerWidget {
     final draft = ref.watch(draftSummaryProvider).valueOrNull;
     final app = ref.watch(appControllerProvider);
     final location = app.nearestLocation;
-    final stats = ref.watch(homeStatsProvider(location?.id));
     final name = _firstName(user?.email);
 
     return Scaffold(
@@ -191,7 +136,6 @@ class HomeScreen extends ConsumerWidget {
           Expanded(
             child: RefreshIndicator(
               onRefresh: () async {
-                ref.invalidate(homeStatsProvider(location?.id));
                 ref.invalidate(hasDraftProvider);
               },
               child: SingleChildScrollView(
@@ -247,64 +191,31 @@ class HomeScreen extends ConsumerWidget {
                                 onDelete: () => _deleteDraft(context, ref),
                               ),
                             );
-                        Widget submittedCard({bool tall = false}) => Entrance(
-                              delay: const Duration(milliseconds: 180),
-                              child: _SmallActionCard(
-                                tall: tall,
-                                icon: Icons.description_outlined,
-                                iconColor: AppColors.blue,
-                                iconBg: AppColors.blueTint,
-                                title: 'Submitted sheets',
-                                subtitle: 'View sheets, reopen receipts',
-                                onTap: () => context.push('/submitted'),
-                              ),
-                            );
+                        // Staff only see "start a sheet" and their own draft:
+                        // no daily counts or submitted-sheet history here.
+                        if (!hasDraft) return hero;
                         if (c.maxWidth < 760) {
                           return Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               hero,
                               const SizedBox(height: 20),
-                              if (hasDraft) ...[
-                                draftCard(),
-                                const SizedBox(height: 20),
-                              ],
-                              submittedCard(),
+                              draftCard(),
                             ],
                           );
                         }
-                        // Side cards stretch to the hero's height.
-                        final side = Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            if (hasDraft) ...[
-                              Expanded(child: draftCard()),
-                              const SizedBox(height: 20),
-                            ],
-                            Expanded(child: submittedCard(tall: !hasDraft)),
-                          ],
-                        );
+                        // Draft card stretches to the hero's height.
                         return IntrinsicHeight(
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               Expanded(flex: 2, child: hero),
                               const SizedBox(width: 20),
-                              Expanded(child: side),
+                              Expanded(child: draftCard()),
                             ],
                           ),
                         );
                       },
-                    ),
-                    const SizedBox(height: 22),
-                    Entrance(
-                      delay: const Duration(milliseconds: 240),
-                      child: _StatsCard(
-                        title: location == null
-                            ? 'Today'
-                            : 'Today at ${location.name}',
-                        stats: stats,
-                      ),
                     ),
                   ],
                 ),
@@ -691,281 +602,6 @@ class _DraftCard extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _SmallActionCard extends StatelessWidget {
-  final IconData icon;
-  final Color iconColor;
-  final Color iconBg;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-  final bool tall;
-  const _SmallActionCard({
-    this.tall = false,
-    required this.icon,
-    required this.iconColor,
-    required this.iconBg,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.navy.withOpacity(0.06),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: PressScale(
-        onTap: onTap,
-        child: Builder(
-          builder: (context) {
-            // Tall (stretched next to the New entry card, no draft): stack
-            // icon on top, title and arrow at the bottom.
-            if (tall) {
-              return Padding(
-                padding: const EdgeInsets.all(28),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        color: iconBg,
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Icon(icon, color: iconColor, size: 30),
-                    ),
-                    const Spacer(),
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.navy,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            subtitle,
-                            style: const TextStyle(fontSize: 15, color: AppColors.slate),
-                          ),
-                        ),
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: iconBg,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(Icons.arrow_forward, color: iconColor, size: 20),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            }
-            return Padding(
-              padding: const EdgeInsets.all(20),
-              child: Row(
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: iconBg,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(icon, color: iconColor),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.navy,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          subtitle,
-                          style: const TextStyle(fontSize: 13, color: AppColors.slate),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Icon(Icons.chevron_right, color: AppColors.slate),
-                ],
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-}
-
-class _StatsCard extends StatelessWidget {
-  final String title;
-  final AsyncValue<HomeStats> stats;
-  const _StatsCard({required this.title, required this.stats});
-
-  @override
-  Widget build(BuildContext context) {
-    final s = stats.valueOrNull;
-    final money = NumberFormat.currency(symbol: r'$', decimalDigits: 2);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(28, 22, 28, 24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.navy.withOpacity(0.06),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.navy,
-                  ),
-                ),
-              ),
-              if (stats.isLoading)
-                const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          LayoutBuilder(
-            builder: (context, c) {
-              final tiles = [
-                _StatTile(
-                  label: 'Customers',
-                  value: (s?.customers ?? 0).toDouble(),
-                  format: (v) => v.round().toString(),
-                  bg: AppColors.blueTint,
-                  fg: AppColors.blueText,
-                ),
-                _StatTile(
-                  label: 'Paid out',
-                  value: s?.paid ?? 0,
-                  format: (v) => money.format(v),
-                  bg: AppColors.greenTint,
-                  fg: AppColors.greenText,
-                ),
-                _StatTile(
-                  label: 'Receipts texted',
-                  value: (s?.texted ?? 0).toDouble(),
-                  format: (v) => v.round().toString(),
-                  bg: AppColors.amberTint,
-                  fg: AppColors.amberText,
-                ),
-                _StatTile(
-                  label: 'Sheets this week',
-                  value: (s?.sheetsThisWeek ?? 0).toDouble(),
-                  format: (v) => v.round().toString(),
-                  bg: AppColors.purpleTint,
-                  fg: AppColors.purpleText,
-                ),
-              ];
-              final cols = c.maxWidth < 600 ? 2 : 4;
-              const gap = 16.0;
-              final w = (c.maxWidth - gap * (cols - 1)) / cols;
-              return Wrap(
-                spacing: gap,
-                runSpacing: gap,
-                children: [for (final t in tiles) SizedBox(width: w, child: t)],
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StatTile extends StatelessWidget {
-  final String label;
-  final double value;
-  final String Function(double) format;
-  final Color bg;
-  final Color fg;
-  const _StatTile({
-    required this.label,
-    required this.value,
-    required this.format,
-    required this.bg,
-    required this.fg,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final reduce = MediaQuery.of(context).disableAnimations;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: TextStyle(fontSize: 13, color: fg)),
-          const SizedBox(height: 2),
-          TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0, end: value),
-            duration: reduce ? Duration.zero : const Duration(milliseconds: 700),
-            curve: Curves.easeOutCubic,
-            builder: (context, v, _) => Text(
-              format(v),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.w700,
-                color: fg,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
