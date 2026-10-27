@@ -321,6 +321,7 @@ class ReceiptData {
     String? locationId,
     String? entryId,
     String? issueKey,
+    String customerId = '',
     Map<ReceiptMaterial, double> priceHints = const {},
   }) {
     final c = List<String>.from(cells);
@@ -435,6 +436,7 @@ class ReceiptData {
       locationId: locationId,
       date: date,
       customerName: customerName,
+      customerId: customerId.trim(),
       lines: lines,
       grandTotal: grand,
       signature: signature,

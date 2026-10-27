@@ -35,4 +35,21 @@ class ReceiptConfig {
       'Reply STOP to opt out, HELP for help.';
 
   static String receiptUrl(String token) => '$receiptBaseUrl/$token';
+
+  /// A customer paid this much or more on one row: staff can't finish the
+  /// signature, issue the receipt or submit the sheet without an I.D. #.
+  static const double idRequiredAt = 100.0;
+
+  static bool idRequiredFor(double total) => total >= idRequiredAt - 0.005;
+
+  /// "$100" for messages.
+  static String get idRequiredAtLabel => '\$${idRequiredAt.toStringAsFixed(0)}';
+
+  /// A typed I.D. # is accepted when it has at least 4 letters or digits.
+  static bool isValidCustomerId(String s) =>
+      s.replaceAll(RegExp(r'[^A-Za-z0-9]'), '').length >= 4;
+
+  /// Upper-case, trimmed, single spaces.
+  static String cleanCustomerId(String s) =>
+      s.trim().toUpperCase().replaceAll(RegExp(r'\s+'), ' ');
 }

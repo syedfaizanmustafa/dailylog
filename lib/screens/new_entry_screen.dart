@@ -9,6 +9,7 @@ import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/brand.dart';
+import '../config/receipt_config.dart';
 import '../controllers/app_controller.dart';
 import '../controllers/auth_controller.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -155,6 +156,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
   /// receipt lookups specific to this entry: another tablet at the same
   /// location also has a "Sheet 1, row 3" today, and must never be found.
   String _draftId = SheetOutbox.newLocalId();
+
+  /// Customer I.D. # per cell ("sheet-row"), typed on the signature screen
+  /// or asked for when a row is paid $100 or more. Kept with the draft.
+  final Map<String, String> _customerIdsByCell = {};
 
   // Helper method to compress signature data
   Map<String, String> _compressSignatures(Map<String, Uint8List>? signatures) {
@@ -327,6 +332,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
         'pricesLocked': _pricesLocked,
         'receiptIds': _receiptIdsByCell,
         'draftId': _draftId,
+        'customerIds': _customerIdsByCell,
       };
       if (_locationOverride != null) {
         draft['locationOverride'] = {
@@ -373,6 +379,11 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       // instead of showing "Signed" with no signature behind it.
       final savedDraftId = draft['draftId']?.toString();
       if (savedDraftId != null && savedDraftId.isNotEmpty) _draftId = savedDraftId;
+
+      final customerIdsRaw = draft['customerIds'];
+      if (customerIdsRaw is Map) {
+        customerIdsRaw.forEach((k, v) => _customerIdsByCell['$k'] = '$v');
+      }
 
       final receiptIdsRaw = draft['receiptIds'] as Map<String, dynamic>?;
       if (receiptIdsRaw != null) {
@@ -882,12 +893,24 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       }
       final existingPoints =
           _sheetsSignaturePoints[_currentSheetNumber]?['$row-$col'];
+      final sheet = _currentSheetNumber;
+      // An unsigned cell never shows an I.D. # left from an earlier customer.
+      if (existingName.isEmpty) _customerIdsByCell.remove('$sheet-$row');
+      final rowTotal = _currentGridData[row].length > 20
+          ? _parseCellValue(_currentGridData[row][20])
+          : 0.0;
       bool signedNow = false;
       await context.push(
         '/customer',
         extra: {
           'existingName': existingName,
           'existingPoints': existingPoints,
+          // Paid $100 or more: the customer screen requires an I.D. #.
+          'idRequired': ReceiptConfig.idRequiredFor(rowTotal),
+          'existingId': _customerIdFor(sheet, row) ?? '',
+          'onCustomerIdComplete': (String id) {
+            _customerIdsByCell['$sheet-$row'] = id;
+          },
           'onSignatureComplete': (
             Uint8List signatureBytes,
             String customerName,
@@ -1341,6 +1364,144 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     return false;
   }
 
+  /// The customer's I.D. # for [row] of [sheet]: typed for this entry, or
+  /// already on the row's receipt. Null when there is none.
+  String? _customerIdFor(int sheet, int row) {
+    final key = '$sheet-$row';
+    final local = (_customerIdsByCell[key] ?? '').trim();
+    if (local.isNotEmpty) return local;
+    final rid = _receiptIdsByCell[key];
+    final onReceipt = (rid == null ? null : _receiptCache[rid])?.customerId.trim() ?? '';
+    return onReceipt.isEmpty ? null : onReceipt;
+  }
+
+  /// Asks staff for the customer's I.D. # for [row] of the current sheet and
+  /// keeps it with the entry (and on the row's receipt, if one was issued).
+  /// Returns false if they cancel.
+  Future<bool> _askCustomerId(int row) async {
+    final sheet = _currentSheetNumber;
+    final cells = row < _currentGridData.length ? _currentGridData[row] : const <String>[];
+    final total = cells.length > 20 ? _parseCellValue(cells[20]) : 0.0;
+    final name = cells.length > 21 && cells[21].contains('/')
+        ? cells[21].split('/').first.trim()
+        : '';
+    final ctrl = TextEditingController(text: _customerIdFor(sheet, row) ?? '');
+    final id = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final ok = ReceiptConfig.isValidCustomerId(ctrl.text);
+          void save() {
+            if (ok) Navigator.of(ctx).pop(ReceiptConfig.cleanCustomerId(ctrl.text));
+          }
+
+          return AlertDialog(
+            title: const Text('Customer I.D. # required'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Sheet $sheet, row ${row + 1}'
+                    '${name.isEmpty ? '' : ' ($name)'} was paid '
+                    '\$${total.toStringAsFixed(2)}. Check the customer\'s I.D. and '
+                    'enter the number: it is required for '
+                    '${ReceiptConfig.idRequiredAtLabel} or more.',
+                    style: const TextStyle(height: 1.4),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    textCapitalization: TextCapitalization.characters,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    decoration: const InputDecoration(
+                      labelText: 'Driver license or I.D. #',
+                      prefixIcon: Icon(Icons.badge_outlined),
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (_) => setLocal(() {}),
+                    onSubmitted: (_) => save(),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: ok ? save : null,
+                child: const Text('Save I.D. #'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (id == null || !mounted) return false;
+    setState(() => _customerIdsByCell['$sheet-$row'] = id);
+    await _saveDraft();
+
+    // Put it on the receipt too, if one was already issued for this row.
+    final rid = _receiptIdsByCell['$sheet-$row'];
+    if (rid != null) {
+      try {
+        final r = _receiptCache[rid] ?? await ReceiptService.getById(rid);
+        if (r != null && r.customerId.trim() != id) {
+          final updated = await ReceiptService.updateCustomerId(r, id);
+          if (mounted) setState(() => _receiptCache[rid] = updated);
+        }
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'I.D. # saved on the sheet, but not on the receipt yet (no connection). '
+                'Open the receipt later to add it.',
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      }
+    }
+    return true;
+  }
+
+  /// Before submitting: every row paid $100 or more needs an I.D. #. Goes to
+  /// each row that is missing one and asks for it. False if staff cancel.
+  Future<bool> _ensureCustomerIds() async {
+    await _refreshReceiptCache(); // I.D.s typed on receipts count too
+    final sheets = _sheetsGridData.keys.toList()..sort();
+    for (final sheet in sheets) {
+      final grid = _sheetsGridData[sheet]!;
+      for (var row = 0; row < rowCount && row < grid.length; row++) {
+        final cells = grid[row];
+        final total = cells.length > 20 ? _parseCellValue(cells[20]) : 0.0;
+        if (!ReceiptConfig.idRequiredFor(total)) continue;
+        if (_customerIdFor(sheet, row) != null) continue;
+        if (!mounted) return false;
+        if (_currentSheetNumber != sheet) {
+          setState(() {
+            _currentSheetNumber = sheet;
+            _initializeSheet(sheet);
+          });
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _calculateAndUpdateTotals();
+          });
+        }
+        if (!await _askCustomerId(row)) return false;
+      }
+    }
+    return mounted;
+  }
+
   /// Opens the receipt for [row] of the current sheet (issuing one if the
   /// customer has signed but no receipt exists yet).
   Future<void> _openReceiptForRow(int row) async {
@@ -1383,6 +1544,13 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       return;
     }
 
+    // Paid $100 or more: no receipt without the customer's I.D. #.
+    if (ReceiptConfig.idRequiredFor(rowTotal) &&
+        _customerIdFor(_currentSheetNumber, row) == null) {
+      if (!await _askCustomerId(row)) return;
+      if (!mounted) return;
+    }
+
     final customerName = signCell.split('/').first.trim();
     final container = ProviderScope.containerOf(context, listen: false);
     final location =
@@ -1402,6 +1570,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       recyclerAddress: location?.address ?? '',
       locationId: location?.id,
       issueKey: '$_draftId-$_currentSheetNumber-$row',
+      customerId: _customerIdFor(_currentSheetNumber, row) ?? '',
       priceHints: {
         ReceiptMaterial.aluminum: _aluminumMultiplier,
         ReceiptMaterial.glass: _glassMultiplier,
@@ -3521,6 +3690,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     final grid = _sheetsGridData[sheetNumber] ?? const <List<String>>[];
     final points = <String, List<Map<String, dynamic>>>{};
     final names = <String, String>{};
+    final ids = <String, String>{};
     signaturePoints.forEach((key, pts) {
       points[key] = [
         for (final p in pts) {'dx': p.offset.dx, 'dy': p.offset.dy, 'type': p.type.index},
@@ -3532,8 +3702,16 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
         final cell = grid[row][col];
         if (cell.contains('/') && cell.contains('Signed')) names[key] = cell.split('/').first;
       }
+      if (row != null) {
+        final id = _customerIdFor(sheetNumber, row);
+        if (id != null) ids[key] = id;
+      }
     });
-    return {'points': points, 'customerNames': names};
+    return {
+      'points': points,
+      'customerNames': names,
+      if (ids.isNotEmpty) 'customerIds': ids,
+    };
   }
 
   // Helper method to reconstruct signature from points
@@ -3571,6 +3749,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
   }
 
   Future<void> _onSubmitPressed() async {
+        // No submitting while a row paid $100 or more has no I.D. #.
+        if (!await _ensureCustomerIds()) return;
+        if (!mounted) return;
+
         final confirmed =
             await showFloatingConfirmationBottomSheet(
           context: context,

@@ -251,10 +251,19 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
     final r = _receipt;
     // Wait for the signature: the ID is saved into the regenerated PDF.
     if (r == null || !r.isIssued || _sigLoading) return;
-    if (_idCtrl.text.trim() == r.customerId) return;
+    final typed = _idCtrl.text.trim().isEmpty ? '' : ReceiptConfig.cleanCustomerId(_idCtrl.text);
+    if (typed == r.customerId) return;
+    if (ReceiptConfig.idRequiredFor(r.grandTotal) && !ReceiptConfig.isValidCustomerId(typed)) {
+      showAppSnack(
+        context,
+        'This receipt is ${ReceiptConfig.idRequiredAtLabel} or more: enter a valid I.D. #.',
+        error: true,
+      );
+      return;
+    }
     setState(() => _savingId = true);
     try {
-      final updated = await ReceiptService.updateCustomerId(r, _idCtrl.text);
+      final updated = await ReceiptService.updateCustomerId(r, typed);
       final bytes = await ReceiptService.render(updated);
       if (!mounted) return;
       setState(() {
@@ -870,9 +879,11 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
           const SizedBox(height: 18),
 
           // ── ID # ──
-          const Text(
-            'Customer I.D. # (optional)',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          Text(
+            r != null && ReceiptConfig.idRequiredFor(r.grandTotal)
+                ? 'Customer I.D. # (required for ${ReceiptConfig.idRequiredAtLabel} or more)'
+                : 'Customer I.D. # (optional)',
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 8),
           TextField(

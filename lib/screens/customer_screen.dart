@@ -16,6 +16,11 @@ import '../services/receipt_service.dart';
 ///
 /// New: an optional "Text me my receipt" phone number, handed to the receipt
 /// screen through [ReceiptService.pendingCustomerPhone] so staff don't retype it.
+///
+/// When `idRequired` is true in `extra` (the row paid
+/// [ReceiptConfig.idRequiredAt] or more), an I.D. # is required: Done stays
+/// off until one is typed, and it is handed back through
+/// `onCustomerIdComplete` (pre-filled from `existingId`).
 class CustomerScreen extends StatefulWidget {
   const CustomerScreen({super.key});
 
@@ -26,7 +31,10 @@ class CustomerScreen extends StatefulWidget {
 class _CustomerScreenState extends State<CustomerScreen> {
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
+  final _idController = TextEditingController();
   late final SignatureController _signatureController;
+  bool _idRequired = false;
+  void Function(String)? _onCustomerIdComplete;
   Function(Uint8List, String)? _onSignatureComplete;
   Function(List<Point>, String)? _onSignaturePointsComplete;
   bool _hasStrokes = false;
@@ -51,6 +59,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
     );
     _signatureController.addListener(_onSignatureChanged);
     _nameController.addListener(() => setState(() {}));
+    _idController.addListener(() => setState(() {}));
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final extra = GoRouterState.of(context).extra;
@@ -65,11 +74,19 @@ class _CustomerScreenState extends State<CustomerScreen> {
             extra['onSignaturePointsComplete'] as Function(List<Point>, String)?;
       }
 
+      final onId = extra['onCustomerIdComplete'];
+      if (onId is void Function(String)) _onCustomerIdComplete = onId;
+
       // Pre-fill existing name + signature when re-opening a signed cell.
       final existingName = extra['existingName'];
       final existingPoints = extra['existingPoints'];
+      final existingId = extra['existingId'];
       if (mounted) {
         setState(() {
+          _idRequired = extra['idRequired'] == true;
+          if (existingId is String && existingId.isNotEmpty) {
+            _idController.text = existingId;
+          }
           if (existingName is String && existingName.isNotEmpty) {
             _nameController.text = existingName;
           }
@@ -91,17 +108,28 @@ class _CustomerScreenState extends State<CustomerScreen> {
     _signatureController.removeListener(_onSignatureChanged);
     _nameController.dispose();
     _phoneController.dispose();
+    _idController.dispose();
     _signatureController.dispose();
     super.dispose();
   }
 
-  bool get _ready => _hasStrokes && _nameController.text.trim().isNotEmpty;
+  bool get _idOk => !_idRequired || ReceiptConfig.isValidCustomerId(_idController.text);
+
+  bool get _ready => _hasStrokes && _nameController.text.trim().isNotEmpty && _idOk;
 
   /// Phones (either orientation) get the full-screen signing layout.
   bool get _isPhone => MediaQuery.sizeOf(context).shortestSide < 600;
 
-  /// Phone: edit name / phone in a small sheet so the pad keeps the screen.
-  Future<void> _editField({required bool phone}) async {
+  /// Phone: edit name / I.D. / phone in a small sheet so the pad keeps the
+  /// screen.
+  Future<void> _editField(_Field field) async {
+    final phone = field == _Field.phone;
+    final id = field == _Field.id;
+    final controller = switch (field) {
+      _Field.name => _nameController,
+      _Field.id => _idController,
+      _Field.phone => _phoneController,
+    };
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -123,12 +151,20 @@ class _CustomerScreenState extends State<CustomerScreen> {
             Row(
               children: [
                 Icon(
-                  phone ? Icons.sms_outlined : Icons.person_outline_rounded,
+                  switch (field) {
+                    _Field.name => Icons.person_outline_rounded,
+                    _Field.id => Icons.badge_outlined,
+                    _Field.phone => Icons.sms_outlined,
+                  },
                   color: phone ? AppColors.amber : AppColors.navy,
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  phone ? 'Text me my receipt' : 'Your full name',
+                  switch (field) {
+                    _Field.name => 'Your full name',
+                    _Field.id => 'Driver license or I.D. #',
+                    _Field.phone => 'Text me my receipt',
+                  },
                   style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
@@ -143,17 +179,23 @@ class _CustomerScreenState extends State<CustomerScreen> {
             ),
             const SizedBox(height: 12),
             TextField(
-              controller: phone ? _phoneController : _nameController,
+              controller: controller,
               autofocus: true,
-              keyboardType: phone ? TextInputType.phone : TextInputType.name,
-              textCapitalization:
-                  phone ? TextCapitalization.none : TextCapitalization.words,
+              keyboardType: phone ? TextInputType.phone : (id ? TextInputType.text : TextInputType.name),
+              textCapitalization: switch (field) {
+                _Field.name => TextCapitalization.words,
+                _Field.id => TextCapitalization.characters,
+                _Field.phone => TextCapitalization.none,
+              },
+              autocorrect: !id,
               inputFormatters: phone ? [_UsPhoneFormatter()] : null,
               textInputAction: TextInputAction.done,
               style: const TextStyle(fontSize: 20),
-              decoration: _fieldDecoration(
-                phone ? '(916) 555-0123' : 'First and last name',
-              ),
+              decoration: _fieldDecoration(switch (field) {
+                _Field.name => 'First and last name',
+                _Field.id => 'e.g. D1234567',
+                _Field.phone => '(916) 555-0123',
+              }),
               onSubmitted: (_) => Navigator.of(ctx).pop(),
             ),
             if (phone) ...[
@@ -161,6 +203,13 @@ class _CustomerScreenState extends State<CustomerScreen> {
               const Text(
                 ReceiptConfig.smsConsentText,
                 style: TextStyle(fontSize: 12, height: 1.5, color: Color(0xFF4A5263)),
+              ),
+            ],
+            if (id) ...[
+              const SizedBox(height: 8),
+              Text(
+                _idHelpText,
+                style: const TextStyle(fontSize: 12, height: 1.5, color: Color(0xFF4A5263)),
               ),
             ],
             const SizedBox(height: 16),
@@ -179,6 +228,10 @@ class _CustomerScreenState extends State<CustomerScreen> {
     if (mounted) setState(() {});
   }
 
+  String get _idHelpText =>
+      'Required for ${ReceiptConfig.idRequiredAtLabel} or more. '
+      'Printed on your receipt. Staff will check your I.D.';
+
   void _clear() {
     HapticFeedback.selectionClick();
     _signatureController.clear();
@@ -188,7 +241,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
     final customerName = _nameController.text.trim();
     if (customerName.isEmpty) {
       if (_isPhone) {
-        await _editField(phone: false);
+        await _editField(_Field.name);
         if (_nameController.text.trim().isEmpty) return;
         return _submit();
       }
@@ -197,6 +250,19 @@ class _CustomerScreenState extends State<CustomerScreen> {
     }
     if (!_signatureController.isNotEmpty) {
       showAppSnack(context, 'Please sign in the box.', error: true);
+      return;
+    }
+    if (!_idOk) {
+      if (_isPhone) {
+        await _editField(_Field.id);
+        if (!_idOk) return;
+        return _submit();
+      }
+      showAppSnack(
+        context,
+        'An I.D. # is required for ${ReceiptConfig.idRequiredAtLabel} or more.',
+        error: true,
+      );
       return;
     }
 
@@ -224,6 +290,11 @@ class _CustomerScreenState extends State<CustomerScreen> {
 
     // Hand the number to the receipt screen that opens next.
     ReceiptService.pendingCustomerPhone = phoneE164;
+
+    // The I.D. # first, so it is there when the receipt is issued right after.
+    if (_idRequired) {
+      _onCustomerIdComplete?.call(ReceiptConfig.cleanCustomerId(_idController.text));
+    }
 
     var called = false;
     if (_onSignaturePointsComplete != null) {
@@ -303,6 +374,8 @@ class _CustomerScreenState extends State<CustomerScreen> {
                   final details = _DetailsCards(
                     nameController: _nameController,
                     phoneController: _phoneController,
+                    idController: _idRequired ? _idController : null,
+                    idHelp: _idHelpText,
                     sideBySide: c.maxWidth >= 640,
                   );
                   final actions = _ActionRow(
@@ -320,7 +393,9 @@ class _CustomerScreenState extends State<CustomerScreen> {
                   // focus and closed the keyboard straight away. Now the
                   // content just keeps a minimum height and scrolls when the
                   // keyboard leaves less room than that.
-                  const minContentHeight = 520.0;
+                  // A third card (I.D. #) stacked under the others needs room.
+                  final minContentHeight =
+                      _idRequired && c.maxWidth < 640 ? 700.0 : 520.0;
                   final fits = c.maxHeight >= minContentHeight;
                   return SingleChildScrollView(
                     // No scrolling when everything fits, so signing strokes
@@ -375,7 +450,16 @@ class _CustomerScreenState extends State<CustomerScreen> {
       value: name.isEmpty ? 'Tap to add your name' : name,
       missing: name.isEmpty,
       accent: AppColors.navy,
-      onTap: () => _editField(phone: false),
+      onTap: () => _editField(_Field.name),
+    );
+    final id = _idController.text.trim();
+    final idTile = _PhoneFieldTile(
+      icon: Icons.badge_outlined,
+      label: 'I.D. # (required)',
+      value: id.isEmpty ? 'Tap to add I.D. #' : id,
+      missing: !_idOk,
+      accent: AppColors.navy,
+      onTap: () => _editField(_Field.id),
     );
     final phoneTile = _PhoneFieldTile(
       icon: Icons.sms_outlined,
@@ -383,7 +467,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
       value: phone.isEmpty ? 'Add phone' : phone,
       missing: false,
       accent: AppColors.amber,
-      onTap: () => _editField(phone: true),
+      onTap: () => _editField(_Field.phone),
     );
     final actions = _ActionRow(
       hasStrokes: _hasStrokes,
@@ -410,6 +494,10 @@ class _CustomerScreenState extends State<CustomerScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   nameTile,
+                  if (_idRequired) ...[
+                    const SizedBox(height: 8),
+                    idTile,
+                  ],
                   const SizedBox(height: 8),
                   phoneTile,
                   const Spacer(),
@@ -435,6 +523,10 @@ class _CustomerScreenState extends State<CustomerScreen> {
               Expanded(flex: 4, child: phoneTile),
             ],
           ),
+          if (_idRequired) ...[
+            const SizedBox(height: 8),
+            idTile,
+          ],
           const SizedBox(height: 10),
           actions,
         ],
@@ -442,6 +534,8 @@ class _CustomerScreenState extends State<CustomerScreen> {
     );
   }
 }
+
+enum _Field { name, id, phone }
 
 class _SignaturePadCard extends StatelessWidget {
   final SignatureController controller;
@@ -602,10 +696,16 @@ BoxDecoration _cardDecoration({Color? outline}) => BoxDecoration(
 class _DetailsCards extends StatelessWidget {
   final TextEditingController nameController;
   final TextEditingController phoneController;
+
+  /// Shown (and required) only when set.
+  final TextEditingController? idController;
+  final String idHelp;
   final bool sideBySide;
   const _DetailsCards({
     required this.nameController,
     required this.phoneController,
+    this.idController,
+    this.idHelp = '',
     required this.sideBySide,
   });
 
@@ -681,16 +781,74 @@ class _DetailsCards extends StatelessWidget {
       ),
     );
 
+    final idc = idController;
+    final idCard = idc == null
+        ? null
+        : Container(
+            padding: const EdgeInsets.all(20),
+            decoration: _cardDecoration(
+              outline: ReceiptConfig.isValidCustomerId(idc.text)
+                  ? null
+                  : AppColors.amberLine,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.badge_outlined, size: 18, color: AppColors.navy),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        'Driver license or I.D. #',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    SizedBox(width: 6),
+                    Text('(required)',
+                        style: TextStyle(color: AppColors.amberText, fontWeight: FontWeight.w600)),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: idc,
+                  textCapitalization: TextCapitalization.characters,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  textInputAction: TextInputAction.next,
+                  style: const TextStyle(fontSize: 18),
+                  decoration: _fieldDecoration('e.g. D1234567'),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  idHelp,
+                  style: const TextStyle(fontSize: 12, height: 1.5, color: Color(0xFF4A5263)),
+                ),
+              ],
+            ),
+          );
+
     if (!sideBySide) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [name, const SizedBox(height: 16), phone],
+        children: [
+          name,
+          if (idCard != null) ...[const SizedBox(height: 16), idCard],
+          const SizedBox(height: 16),
+          phone,
+        ],
       );
     }
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Expanded(flex: 2, child: name),
+        if (idCard != null) ...[
+          const SizedBox(width: 16),
+          Expanded(flex: 2, child: idCard),
+        ],
         const SizedBox(width: 16),
         Expanded(flex: 3, child: phone),
       ],
