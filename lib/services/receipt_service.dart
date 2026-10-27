@@ -47,27 +47,47 @@ class ReceiptService {
 
   // ── Issue ─────────────────────────────────────────────────────────────
 
-  /// Allocates the next receipt number, renders the PDF, uploads it and
-  /// writes the receipt document. Returns the issued receipt.
+  /// Allocates the next receipt number, renders the PDF and writes the
+  /// receipt document. Returns the issued receipt; its PDF is ready right
+  /// away from [cachedPdf].
   ///
-  /// Idempotent per log-sheet cell: if a receipt already exists for the same
-  /// `(entryId | locationId+date, sheetNumber, row)` it is returned instead
-  /// of issuing a duplicate number.
+  /// Fast path: the lookups run side by side, and the PDF is uploaded to
+  /// Storage in the background (texting, emailing and saving an I.D. # wait
+  /// for that upload, see [ensurePdfStored]).
+  ///
+  /// Idempotent per cell: a draft from New Entry carries an [issueKey] that
+  /// is also the document id, so a retry returns this tablet's own receipt.
+  /// A receipt for a submitted entry is matched by (entryId, sheet, row).
   static Future<ReceiptData> issue(
     ReceiptData draft, {
     required String issuedByUid,
   }) async {
     if (draft.isIssued) return draft;
 
-    final existing = await findForCell(draft);
+    final key = (draft.issueKey ?? '').trim();
+    final docRef = key.isNotEmpty ? _receipts.doc(key) : _receipts.doc();
+
+    // 1) Side by side: already issued?, location number, signature setting.
+    final first = await Future.wait<Object?>([
+      key.isNotEmpty ? _existing(docRef) : findForCell(draft),
+      _locationNumber(draft.locationId),
+      _inlineSignatures(),
+    ]);
+    final existing = first[0] as ReceiptData?;
     if (existing != null) return existing;
+    final locationNumber = first[1] as int;
+    final inline = first[2] as bool;
 
-    final number = await _allocateNumber();
-    final code = await _codeFor(draft);
+    // 2) Side by side: next number (transaction) and a free receipt code.
+    final second = await Future.wait<Object>([
+      _allocateNumber(),
+      _codeFor(draft, locationNumber),
+    ]);
+    final number = second[0] as int;
+    final code = second[1] as String;
     final token = _randomToken();
-    final docRef = _receipts.doc();
 
-    var issued = draft.copyWith(
+    final issued = draft.copyWith(
       id: docRef.id,
       receiptNumber: number,
       receiptCode: code,
@@ -78,21 +98,9 @@ class ReceiptService {
     );
 
     final bytes = await ReceiptPdfService.build(issued);
-    await _storage.ref(issued.pdfPath!).putData(
-          bytes,
-          SettableMetadata(
-            contentType: 'application/pdf',
-            customMetadata: {
-              'receiptNumber': number.toString(),
-              'receiptCode': code,
-              'token': token,
-            },
-          ),
-        );
 
     // Receipt + its signature in one atomic write. Until "Speed up receipts"
     // has run, the signature is also kept inline for older app versions.
-    final inline = await _inlineSignatures();
     final batch = _db.batch();
     batch.set(docRef, {
       ...issued.toFirestore(),
@@ -105,7 +113,137 @@ class ReceiptService {
     }
     await batch.commit();
     SyncedCollection.receipts.touch();
+
+    _rememberPdf(docRef.id, bytes);
+    _uploadInBackground(issued, bytes);
     return issued;
+  }
+
+  /// This tablet's receipt with document id [ref], if it was issued already.
+  static Future<ReceiptData?> _existing(DocumentReference<Map<String, dynamic>> ref) async {
+    try {
+      final doc = await ref.get();
+      return doc.exists ? ReceiptData.fromFirestore(doc) : null;
+    } catch (_) {
+      return null; // can't tell: the create below fails rather than duplicate
+    }
+  }
+
+  // ── PDF in Storage (uploaded in the background) ────────────────────────
+
+  /// PDFs issued on this tablet in this session, newest last (a few only).
+  static final Map<String, Uint8List> _pdfCache = {};
+
+  /// Uploads in progress, by receipt id.
+  static final Map<String, Future<void>> _uploads = {};
+
+  /// Receipt ids whose PDF is known to be in Storage.
+  static final Set<String> _stored = {};
+
+  static void _rememberPdf(String id, Uint8List bytes) {
+    _pdfCache.remove(id);
+    _pdfCache[id] = bytes;
+    while (_pdfCache.length > 6) {
+      _pdfCache.remove(_pdfCache.keys.first);
+    }
+  }
+
+  /// The PDF this tablet just built for receipt [id], if still in memory.
+  static Uint8List? cachedPdf(String? id) => id == null ? null : _pdfCache[id];
+
+  static Future<void> _putPdf(ReceiptData r, Uint8List bytes) async {
+    await _storage.ref(r.pdfPath!).putData(
+          bytes,
+          SettableMetadata(
+            contentType: 'application/pdf',
+            customMetadata: {
+              'receiptNumber': '${r.receiptNumber ?? ''}',
+              'receiptCode': r.receiptCode ?? '',
+              'token': r.token ?? '',
+            },
+          ),
+        );
+    _stored.add(r.id!);
+  }
+
+  /// Starts the upload without waiting for it; retries once on failure.
+  /// If both attempts fail, [ensurePdfStored] uploads it before a text or
+  /// email goes out.
+  static void _uploadInBackground(ReceiptData r, Uint8List bytes) {
+    final id = r.id!;
+    Future<void> run() async {
+      try {
+        await _putPdf(r, bytes);
+      } catch (_) {
+        await Future<void>.delayed(const Duration(seconds: 3));
+        await _putPdf(r, bytes);
+      }
+    }
+
+    final f = run();
+    _uploads[id] = f;
+    f.then<void>((_) {
+      _uploads.remove(id);
+    }, onError: (Object _) {
+      _uploads.remove(id);
+    });
+  }
+
+  /// Makes sure receipt [id]'s PDF is in Storage (the texted / emailed link
+  /// serves it from there). Waits for this tablet's background upload, or
+  /// checks Storage and uploads the PDF if it is missing.
+  static Future<void> ensurePdfStored(String id) async {
+    final pending = _uploads[id];
+    if (pending != null) {
+      try {
+        await pending;
+        return;
+      } catch (_) {
+        // Fall through: check and upload again below.
+      }
+    }
+    if (_stored.contains(id)) return;
+    final r = await getById(id);
+    final path = r?.pdfPath;
+    if (r == null || path == null) return;
+    try {
+      await _storage.ref(path).getMetadata();
+      _stored.add(id);
+      return;
+    } on FirebaseException catch (e) {
+      if (e.code != 'object-not-found') rethrow;
+    }
+    final bytes = _pdfCache[id] ?? await ReceiptPdfService.build(await withSignature(r));
+    await _putPdf(r, bytes);
+  }
+
+  /// Waits for a background upload of [id] still in progress (ignoring its
+  /// outcome), so a newer PDF written next is never overwritten by it.
+  static Future<void> _afterPendingUpload(String id) async {
+    final pending = _uploads[id];
+    if (pending == null) return;
+    try {
+      await pending;
+    } catch (_) {}
+  }
+
+  // ── Small lookups, cached for the session ─────────────────────────────
+
+  static final Map<String, int> _locationNumbers = {};
+
+  /// The location's number used in receipt codes (0 when unknown).
+  static Future<int> _locationNumber(String? locId) async {
+    if (locId == null || locId.isEmpty) return 0;
+    final known = _locationNumbers[locId];
+    if (known != null) return known;
+    try {
+      final loc = await _db.collection('locations').doc(locId).get();
+      final n = (loc.data()?['number'] as num?)?.toInt() ?? 0;
+      if (n > 0) _locationNumbers[locId] = n;
+      return n;
+    } catch (_) {
+      return 0;
+    }
   }
 
   // ── Signature (kept out of the receipt document) ───────────────────────
@@ -117,13 +255,24 @@ class ReceiptService {
   /// device may still be on an older app version that reads the signature
   /// from the receipt itself, so new receipts keep an inline copy too.
   static Future<bool> _inlineSignatures() async {
+    // Once moved, always moved: no need to ask again this session.
+    if (_signaturesMoved) return false;
+    final at = _inlineCheckedAt;
+    if (at != null && DateTime.now().difference(at) < const Duration(minutes: 10)) {
+      return true;
+    }
     try {
       final d = await _settingsRef.get();
-      return d.data()?['signaturesMoved'] != true;
+      _signaturesMoved = d.data()?['signaturesMoved'] == true;
+      _inlineCheckedAt = DateTime.now();
+      return !_signaturesMoved;
     } catch (_) {
       return true; // can't tell: keep the safe (inline) copy
     }
   }
+
+  static bool _signaturesMoved = false;
+  static DateTime? _inlineCheckedAt;
 
   static DocumentReference<Map<String, dynamic>> _signatureRef(String receiptId) =>
       _receipts.doc(receiptId).collection('private').doc('signature');
@@ -211,15 +360,7 @@ class ReceiptService {
 
   /// `LL-YYMMDD-SS-RR` for a draft; adds `-2`, `-3`… if that exact code was
   /// already used (two iPads logging the same sheet/row the same day).
-  static Future<String> _codeFor(ReceiptData d) async {
-    var location = 0;
-    final locId = d.locationId;
-    if (locId != null && locId.isNotEmpty) {
-      try {
-        final loc = await _db.collection('locations').doc(locId).get();
-        location = (loc.data()?['number'] as num?)?.toInt() ?? 0;
-      } catch (_) {}
-    }
+  static Future<String> _codeFor(ReceiptData d, int location) async {
     for (var copy = 1; copy < 50; copy++) {
       final code = ReceiptCode.build(
         location: location,
@@ -260,6 +401,7 @@ class ReceiptService {
     );
     final full = await withSignature(updated);
     final bytes = await ReceiptPdfService.build(full);
+    await _afterPendingUpload(id);
     await _storage.ref(path).putData(
           bytes,
           SettableMetadata(
@@ -296,6 +438,8 @@ class ReceiptService {
     }
     await batch.commit();
     SyncedCollection.receipts.touch();
+    _stored.add(id);
+    _rememberPdf(id, bytes);
     return full;
   }
 
@@ -309,20 +453,17 @@ class ReceiptService {
   static Future<Uint8List> renderWithoutSignature(ReceiptData r) =>
       ReceiptPdfService.build(r, signaturePending: true);
 
-  /// Looks for an already-issued receipt for the same sheet cell.
+  /// Looks for an already-issued receipt for the same cell of a submitted
+  /// entry. Drafts are matched by [ReceiptData.issueKey] in [issue] instead:
+  /// matching a draft by location + day + sheet + row would find another
+  /// tablet's receipt (each tablet's entry starts at sheet 1).
   static Future<ReceiptData?> findForCell(ReceiptData d) async {
+    if (d.entryId == null) return null;
     try {
-      Query<Map<String, dynamic>> q = _receipts
+      final q = _receipts
           .where('sheetNumber', isEqualTo: d.sheetNumber)
-          .where('row', isEqualTo: d.row);
-      if (d.entryId != null) {
-        q = q.where('entryId', isEqualTo: d.entryId);
-      } else {
-        q = q
-            .where('entryDateKey', isEqualTo: d.entryDateKey)
-            .where('locationId', isEqualTo: d.locationId)
-            .where('entryId', isNull: true);
-      }
+          .where('row', isEqualTo: d.row)
+          .where('entryId', isEqualTo: d.entryId);
       final snap = await q.limit(1).get();
       if (snap.docs.isEmpty) return null;
       return ReceiptData.fromFirestore(snap.docs.first);
@@ -356,6 +497,7 @@ class ReceiptService {
   /// Queues an SMS with the receipt link. [phoneE164] must be `+1XXXXXXXXXX`.
   /// The Cloud Function picks up `sms.status == 'pending'`.
   static Future<void> requestSms(String receiptId, String phoneE164) async {
+    await ensurePdfStored(receiptId);
     await _receipts.doc(receiptId).update({
       'sms': ReceiptDelivery(
         requested: true,
@@ -368,6 +510,7 @@ class ReceiptService {
   }
 
   static Future<void> requestEmail(String receiptId, String email) async {
+    await ensurePdfStored(receiptId);
     await _receipts.doc(receiptId).update({
       'email': ReceiptDelivery(
         requested: true,
@@ -392,10 +535,13 @@ class ReceiptService {
     if (updated.id == null) return updated;
     if (updated.pdfPath != null) {
       final bytes = await ReceiptPdfService.build(updated);
+      await _afterPendingUpload(updated.id!);
       await _storage.ref(updated.pdfPath!).putData(
             bytes,
             SettableMetadata(contentType: 'application/pdf'),
           );
+      _stored.add(updated.id!);
+      _rememberPdf(updated.id!, bytes);
     }
     await _receipts
         .doc(updated.id!)

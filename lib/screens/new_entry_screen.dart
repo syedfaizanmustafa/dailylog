@@ -151,6 +151,11 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
   /// Linked to the entry document once the sheet is submitted.
   final Map<String, String> _receiptIdsByCell = {};
 
+  /// This tablet's id for the entry in progress (kept with the draft). Makes
+  /// receipt lookups specific to this entry: another tablet at the same
+  /// location also has a "Sheet 1, row 3" today, and must never be found.
+  String _draftId = SheetOutbox.newLocalId();
+
   // Helper method to compress signature data
   Map<String, String> _compressSignatures(Map<String, Uint8List>? signatures) {
     final Map<String, String> compressedSignatures = {};
@@ -321,6 +326,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
         'pricesLocationId': _pricesLocationId,
         'pricesLocked': _pricesLocked,
         'receiptIds': _receiptIdsByCell,
+        'draftId': _draftId,
       };
       if (_locationOverride != null) {
         draft['locationOverride'] = {
@@ -365,6 +371,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
 
       // Restore signature strokes so signed cells re-render (and re-submit)
       // instead of showing "Signed" with no signature behind it.
+      final savedDraftId = draft['draftId']?.toString();
+      if (savedDraftId != null && savedDraftId.isNotEmpty) _draftId = savedDraftId;
+
       final receiptIdsRaw = draft['receiptIds'] as Map<String, dynamic>?;
       if (receiptIdsRaw != null) {
         receiptIdsRaw.forEach((k, v) => _receiptIdsByCell[k] = v.toString());
@@ -1392,6 +1401,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       recyclerName: location?.name ?? '',
       recyclerAddress: location?.address ?? '',
       locationId: location?.id,
+      issueKey: '$_draftId-$_currentSheetNumber-$row',
       priceHints: {
         ReceiptMaterial.aluminum: _aluminumMultiplier,
         ReceiptMaterial.glass: _glassMultiplier,

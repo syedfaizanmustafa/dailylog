@@ -129,15 +129,27 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
       } else {
         pendingPhone = ReceiptService.takePendingCustomerPhone();
         final uid = ref.read(authControllerProvider).value?.uid ?? 'unknown';
-        // Render a local preview first so the screen is never blank, then
-        // issue the number (needs network).
-        _pdfBytes = await ReceiptService.render(widget.draft!);
-        if (mounted) setState(() => _receipt = widget.draft);
-        r = await ReceiptService.issue(widget.draft!, issuedByUid: uid);
+        // Start issuing (network) right away and render the local preview
+        // while it runs, so the screen is never blank.
+        final issuing = ReceiptService.issue(widget.draft!, issuedByUid: uid);
+        // Observed here so an early failure isn't reported as unhandled
+        // while the preview renders; it is still thrown by `await` below.
+        issuing.then<void>((_) {}, onError: (Object _) {});
+        final preview = await ReceiptService.render(widget.draft!);
+        if (mounted && _receipt == null) {
+          setState(() {
+            _pdfBytes = preview;
+            _receipt = widget.draft;
+          });
+        }
+        r = await issuing;
         freshlyIssued = true;
         widget.onIssued?.call(r);
       }
-      final bytes = await ReceiptService.render(r);
+      // A receipt issued just now already has its PDF built: don't build it
+      // a second time.
+      final cached = freshlyIssued ? ReceiptService.cachedPdf(r.id) : null;
+      final bytes = cached ?? await ReceiptService.render(r);
       if (!mounted) return;
       setState(() {
         _receipt = r;

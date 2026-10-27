@@ -193,6 +193,12 @@ class ReceiptData {
 
   // Link back to the log sheet
   final String? entryId;
+
+  /// Identifies the cell this receipt was issued for on ONE tablet's
+  /// in-progress entry (`draftId-sheet-row`). Also the receipt's document id,
+  /// so a retry finds its own receipt and never another tablet's (every
+  /// tablet's entry starts at sheet 1, so sheet + row alone is not unique).
+  final String? issueKey;
   final int sheetNumber;
   final int row;
 
@@ -220,6 +226,7 @@ class ReceiptData {
     required this.grandTotal,
     required this.signature,
     this.entryId,
+    this.issueKey,
     required this.sheetNumber,
     required this.row,
     this.pdfPath,
@@ -275,6 +282,7 @@ class ReceiptData {
       grandTotal: grandTotal,
       signature: signature ?? this.signature,
       entryId: entryId ?? this.entryId,
+      issueKey: issueKey,
       sheetNumber: sheetNumber ?? this.sheetNumber,
       row: row,
       pdfPath: pdfPath ?? this.pdfPath,
@@ -312,6 +320,7 @@ class ReceiptData {
     required String recyclerAddress,
     String? locationId,
     String? entryId,
+    String? issueKey,
     Map<ReceiptMaterial, double> priceHints = const {},
   }) {
     final c = List<String>.from(cells);
@@ -430,6 +439,7 @@ class ReceiptData {
       grandTotal: grand,
       signature: signature,
       entryId: entryId,
+      issueKey: issueKey,
       sheetNumber: sheetNumber,
       row: row,
     );
@@ -463,6 +473,7 @@ class ReceiptData {
         // Stroke points live in receipts/{id}/private/signature (see
         // ReceiptService) so lists of receipts stay small.
         'entryId': entryId,
+        if (issueKey != null) 'issueKey': issueKey,
         'sheetNumber': sheetNumber,
         'row': row,
         'pdfPath': pdfPath,
@@ -503,6 +514,7 @@ class ReceiptData {
               ReceiptSignaturePoint.fromMap(Map<String, dynamic>.from(e as Map)))
           .toList(),
       entryId: d['entryId']?.toString(),
+      issueKey: d['issueKey']?.toString(),
       sheetNumber: (d['sheetNumber'] as num?)?.toInt() ?? 1,
       row: (d['row'] as num?)?.toInt() ?? 0,
       pdfPath: d['pdfPath']?.toString(),
