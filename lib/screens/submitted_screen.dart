@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../controllers/auth_controller.dart';
 import '../utils/sheet_cell_numeric.dart';
+import '../utils/entry_stats.dart';
 import '../widgets/shimmer.dart';
 
 class SubmittedScreen extends ConsumerStatefulWidget {
@@ -54,6 +55,8 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
         double glassTotal = 0.0;
         double petePlasticTotal = 0.0;
         double otherCommoditiesTotal = 0.0;
+        // Other commodities split by the row's CODE (column 15).
+        final otherByCode = <String, double>{};
 
         double parseCellValue(String value) => parseSheetCellNumericValue(value);
 
@@ -72,7 +75,14 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                 if (col == 0) aluminiumTotal += numVal;
                 else if (col == 5) glassTotal += numVal;
                 else if (col == 10) petePlasticTotal += numVal;
-                else if (col == 16) otherCommoditiesTotal += numVal;
+                else if (col == 16) {
+                  otherCommoditiesTotal += numVal;
+                  if (numVal > 0) {
+                    final ci = row * cols + 15;
+                    final code = normalizeOtherCode(ci < values.length ? values[ci].toString() : '');
+                    otherByCode[code] = (otherByCode[code] ?? 0.0) + numVal;
+                  }
+                }
                 else if (col == 4 || col == 9 || col == 14 || col == 19) totalAmount += numVal;
               }
             }
@@ -98,6 +108,7 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
           'glassTotal': glassTotal,
           'petePlasticTotal': petePlasticTotal,
           'otherCommoditiesTotal': otherCommoditiesTotal,
+          'otherByCode': otherByCode,
         });
       }
 
@@ -330,6 +341,7 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                                                 ),
                                           ),
                                           const SizedBox(height: 8),
+                                          // Aluminium · Glass · PETE first, then Other by code
                                           Row(
                                             children: [
                                               Expanded(
@@ -346,11 +358,6 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                                                   Colors.green[600]!,
                                                 ),
                                               ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 8),
-                                          Row(
-                                            children: [
                                               Expanded(
                                                 child: _buildSectionItem(
                                                   'Pete Plastic',
@@ -358,15 +365,41 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
                                                   Colors.orange[600]!,
                                                 ),
                                               ),
-                                              Expanded(
-                                                child: _buildSectionItem(
-                                                  'Other Commodities',
-                                                  (entry['otherCommoditiesTotal'] as double?) ?? 0.0,
-                                                  Colors.purple[600]!,
-                                                ),
-                                              ),
                                             ],
                                           ),
+                                          Builder(builder: (context) {
+                                            final codes = ((entry['otherByCode'] as Map<String, double>?) ??
+                                                    const <String, double>{})
+                                                .entries
+                                                .toList()
+                                              ..sort((a, b) => b.value.compareTo(a.value));
+                                            if (codes.isEmpty) return const SizedBox.shrink();
+                                            return Padding(
+                                              padding: const EdgeInsets.only(top: 8),
+                                              child: Wrap(
+                                                spacing: 6,
+                                                runSpacing: 6,
+                                                children: [
+                                                  for (final c in codes)
+                                                    Container(
+                                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                      decoration: BoxDecoration(
+                                                        color: Colors.purple[50],
+                                                        borderRadius: BorderRadius.circular(8),
+                                                      ),
+                                                      child: Text(
+                                                        '${otherCodeLabel(c.key)} ${c.value.toStringAsFixed(2)} lb',
+                                                        style: TextStyle(
+                                                          fontSize: 12,
+                                                          fontWeight: FontWeight.w600,
+                                                          color: Colors.purple[700],
+                                                        ),
+                                                      ),
+                                                    ),
+                                                ],
+                                              ),
+                                            );
+                                          }),
                                         ],
                                       ),
                                     ),

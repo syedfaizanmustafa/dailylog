@@ -660,6 +660,23 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                     ),
                   ),
           ),
+          // Pounds for whatever the filters / search show: Aluminum · Glass ·
+          // PETE first, then each Other code.
+          if (!_loading && _error == null && visible.isNotEmpty)
+            Padding(
+              padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 10),
+              child: _PoundsInView(
+                totals: () {
+                  final t = MaterialTotals();
+                  for (final r in visible) {
+                    t.add(r);
+                  }
+                  return t;
+                }(),
+                sheets: visible.length,
+                partial: _hasMore && _rangeDays == null && _filter != 'pending',
+              ),
+            ),
           Expanded(
             child: _buildList(
               visible: visible,
@@ -1457,6 +1474,56 @@ class _SheetRow extends StatelessWidget {
             child: content,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// "Pounds in this view" strip above the list.
+class _PoundsInView extends StatelessWidget {
+  final MaterialTotals totals;
+  final int sheets;
+
+  /// More pages exist that are not loaded yet.
+  final bool partial;
+  const _PoundsInView({required this.totals, required this.sheets, required this.partial});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Text(
+                'POUNDS IN THIS VIEW',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                  color: AppColors.slate,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '$sheets entr${sheets == 1 ? 'y' : 'ies'}${partial ? ' loaded so far' : ''}',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: AppColors.slate),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          MaterialStrip(totals: totals),
+        ],
       ),
     );
   }

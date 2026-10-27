@@ -1156,16 +1156,32 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
 
   Widget _totalsTab() {
     final perSheet = <int, (List<double>, double)>{};
+    // Other commodities by CODE per sheet: code -> (lb, paid). '' = no code.
+    final codesPerSheet = <int, Map<String, (double, double)>>{};
+    final allCodes = <String, (double, double)>{};
+    void addCode(Map<String, (double, double)> m, String code, double lb, double paid) {
+      final v = m[code] ?? (0.0, 0.0);
+      m[code] = (v.$1 + lb, v.$2 + paid);
+    }
+
     for (final s in _sheetNumbers) {
       final lb = List<double>.filled(4, 0);
       double paid = 0;
+      final codes = <String, (double, double)>{};
       for (final r in _customers(s)) {
         for (int i = 0; i < 4; i++) {
           lb[i] += _matLb(r.cells, i);
         }
         paid += r.total;
+        final oLb = _matLb(r.cells, 3), oPaid = _matPaid(r.cells, 3);
+        if (oLb > 0 || oPaid > 0) {
+          final code = normalizeOtherCode(_cellAt(r.cells, _kCodeCol));
+          addCode(codes, code, oLb, oPaid);
+          addCode(allCodes, code, oLb, oPaid);
+        }
       }
       perSheet[s] = (lb, paid);
+      codesPerSheet[s] = codes;
     }
     final allLb = List<double>.filled(4, 0);
     double allPaid = 0;
@@ -1175,6 +1191,13 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
       }
       allPaid += v.$2;
     }
+
+    // Heaviest first.
+    List<MapEntry<String, (double, double)>> sorted(Map<String, (double, double)> m) =>
+        m.entries.toList()..sort((a, b) => b.value.$1.compareTo(a.value.$1));
+    String codeLine(Map<String, (double, double)> m) => sorted(m)
+        .map((e) => '${otherCodeLabel(e.key)} ${NumberFormat('#,##0.##').format(e.value.$1)}')
+        .join('  ·  ');
 
     // By basis across every material (SC is a count).
     final basis = <String, double>{'SW': 0, 'SC': 0, 'C': 0, 'SP': 0};
@@ -1190,7 +1213,8 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
 
     String lbCell(double v) => NumberFormat('#,##0.##').format(v);
 
-    Widget line(String name, List<double> lb, double paid, {bool bold = false, VoidCallback? onTap}) {
+    Widget line(String name, List<double> lb, double paid,
+        {bool bold = false, VoidCallback? onTap, String codes = ''}) {
       final w = bold ? FontWeight.w700 : FontWeight.w500;
       return InkWell(
         borderRadius: BorderRadius.circular(10),
@@ -1201,25 +1225,147 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
             color: bold ? AppColors.mist : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
           ),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SizedBox(width: 46, child: Text(name, style: TextStyle(fontSize: 13, fontWeight: w))),
-              for (int i = 0; i < 4; i++)
-                Expanded(child: Text(lbCell(lb[i]), style: TextStyle(fontSize: 12.5, fontWeight: w))),
-              SizedBox(
-                width: 76,
-                child: Text(_fmtMoney0(paid),
-                    textAlign: TextAlign.right, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+              Row(
+                children: [
+                  SizedBox(width: 46, child: Text(name, style: TextStyle(fontSize: 13, fontWeight: w))),
+                  for (int i = 0; i < 3; i++)
+                    Expanded(child: Text(lbCell(lb[i]), style: TextStyle(fontSize: 12.5, fontWeight: w))),
+                  SizedBox(
+                    width: 76,
+                    child: Text(_fmtMoney0(paid),
+                        textAlign: TextAlign.right, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                  ),
+                ],
               ),
+              if (codes.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 46, top: 2),
+                  child: Text(codes,
+                      style: TextStyle(fontSize: 11, fontWeight: w, color: AppColors.purpleText)),
+                ),
             ],
           ),
         ),
       );
     }
 
+    final everyone = [for (final s in _sheetNumbers) ..._customers(s)];
+    final otherAll = allCodes.values.fold<(double, double)>((0.0, 0.0), (a, v) => (a.$1 + v.$1, a.$2 + v.$2));
+
+    Widget bigTile(int i) {
+      final m = _kMats[i];
+      return Expanded(
+        child: Container(
+          margin: EdgeInsets.only(left: i == 0 ? 0 : 6),
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+          decoration: BoxDecoration(
+            color: m.tint,
+            borderRadius: BorderRadius.circular(12),
+            border: Border(top: BorderSide(color: m.color, width: 4)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(i == 2 ? 'PETE Plastic' : m.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: m.text)),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(_fmtLb(allLb[i]),
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: m.text)),
+              ),
+              Text(_fmtMoney0(everyone.fold<double>(0, (a, r) => a + _matPaid(r.cells, i))),
+                  style: TextStyle(fontSize: 11.5, color: m.text)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget codeTile(MapEntry<String, (double, double)> e) => Container(
+          padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
+          decoration: BoxDecoration(color: AppColors.purpleTint, borderRadius: BorderRadius.circular(10)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(otherCodeLabel(e.key),
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.purpleText)),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(otherCodeName(e.key),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 10.5, color: AppColors.slate)),
+                  ),
+                ],
+              ),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(_fmtLb(e.value.$1),
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.navy)),
+              ),
+            ],
+          ),
+        );
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 24),
       children: [
+        _card(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Row(
+                children: [
+                  Expanded(
+                    child: Text('Pounds · all sheets',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.navy)),
+                  ),
+                  Text('lb · \$ paid', style: TextStyle(fontSize: 12, color: AppColors.slate)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [bigTile(0), bigTile(1), bigTile(2)]),
+              if (allCodes.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text('Other commodities by code',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.purpleText)),
+                    ),
+                    Text('${_fmtLb(otherAll.$1)} · ${_fmtMoney0(otherAll.$2)}',
+                        style: const TextStyle(fontSize: 12, color: AppColors.slate)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                LayoutBuilder(
+                  builder: (context, c) {
+                    final w = (c.maxWidth - 12) / 3;
+                    return Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final e in sorted(allCodes)) SizedBox(width: w, child: codeTile(e)),
+                      ],
+                    );
+                  },
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
         _card(
           Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1239,7 +1385,7 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
                 child: Row(
                   children: [
                     const SizedBox(width: 46, child: Text('SHEET', style: _kHeadStyle)),
-                    for (final m in _kMats)
+                    for (final m in _kMats.take(3))
                       Expanded(
                         child: Text(m.short.toUpperCase(),
                             style: _kHeadStyle.copyWith(color: m.text)),
@@ -1249,11 +1395,13 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
                 ),
               ),
               for (final s in _sheetNumbers)
-                line('$s', perSheet[s]!.$1, perSheet[s]!.$2, onTap: () => setState(() {
-                      _sheet = s;
-                      _tab = 2;
-                    })),
-              line('All', allLb, allPaid, bold: true),
+                line('$s', perSheet[s]!.$1, perSheet[s]!.$2,
+                    codes: codeLine(codesPerSheet[s]!),
+                    onTap: () => setState(() {
+                          _sheet = s;
+                          _tab = 2;
+                        })),
+              line('All', allLb, allPaid, bold: true, codes: codeLine(allCodes)),
               const Padding(
                 padding: EdgeInsets.fromLTRB(4, 6, 4, 0),
                 child: Text('Tap a sheet to open it in the Sheet tab',

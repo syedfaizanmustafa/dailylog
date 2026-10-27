@@ -18,6 +18,7 @@ import 'dart:io';
 
 import '../utils/log_sheet_cell_label.dart';
 import '../utils/sheet_cell_numeric.dart';
+import '../utils/entry_stats.dart';
 import '../widgets/dual_numeric_cell_editor.dart';
 import '../widgets/single_numeric_cell_editor.dart';
 import '../models/location_prices.dart';

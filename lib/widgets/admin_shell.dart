@@ -1387,8 +1387,9 @@ class MaterialChips extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final rows = totals.rows.where((r) => r.$2 > 0 || r.$3 > 0).toList();
-    if (rows.isEmpty) {
+    final rows = totals.mainRows.where((r) => r.$2 > 0 || r.$3 > 0).toList();
+    final codes = totals.otherCodeRows;
+    if (rows.isEmpty && codes.isEmpty) {
       return Text(
         'No material weights entered',
         style: TextStyle(fontSize: dense ? 11.5 : 12.5, color: AppColors.slate),
@@ -1415,7 +1416,132 @@ class MaterialChips extends StatelessWidget {
               ),
             ),
           ),
+        for (final (code, lb, paid) in codes)
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: dense ? 7 : 9, vertical: dense ? 2 : 4),
+            decoration: BoxDecoration(
+              color: AppColors.purpleTint,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              '${otherCodeLabel(code)} ${formatLb(lb)} lb'
+              '${showPaid && paid > 0 ? ' · ${formatMoney(paid)}' : ''}',
+              style: TextStyle(
+                fontSize: dense ? 11 : 12,
+                fontWeight: FontWeight.w600,
+                color: AppColors.purpleText,
+              ),
+            ),
+          ),
       ],
+    );
+  }
+}
+
+/// Other commodities split by CODE (#2, CC, #6…), heaviest first: one small
+/// purple tile each with pounds and dollars. Shown right under the Aluminum /
+/// Glass / PETE totals. Nothing is drawn when no Other was brought in.
+class OtherCodeTiles extends StatelessWidget {
+  final MaterialTotals totals;
+
+  /// Tiles per row; null = fit as many ~120 px tiles as the width allows.
+  final int? columns;
+  final bool showHeader;
+  const OtherCodeTiles({super.key, required this.totals, this.columns, this.showHeader = true});
+
+  @override
+  Widget build(BuildContext context) {
+    final codes = totals.otherCodeRows;
+    if (codes.isEmpty) return const SizedBox.shrink();
+    return LayoutBuilder(
+      builder: (context, c) {
+        const gap = 8.0;
+        final cols = columns ?? (c.maxWidth / 128).floor().clamp(2, 8);
+        final w = (c.maxWidth - gap * (cols - 1)) / cols;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (showHeader) ...[
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Other commodities by code',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.purpleText),
+                    ),
+                  ),
+                  Text(
+                    '${formatLb(totals.otherLb)} lb · ${formatMoney(totals.otherPaid)}',
+                    style: const TextStyle(fontSize: 12, color: AppColors.slate),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+            Wrap(
+              spacing: gap,
+              runSpacing: gap,
+              children: [
+                for (final (code, lb, paid) in codes)
+                  SizedBox(
+                    width: w,
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                      decoration: BoxDecoration(
+                        color: AppColors.purpleTint,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.baseline,
+                            textBaseline: TextBaseline.alphabetic,
+                            children: [
+                              Text(
+                                otherCodeLabel(code),
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800,
+                                  color: AppColors.purpleText,
+                                ),
+                              ),
+                              const SizedBox(width: 5),
+                              Expanded(
+                                child: Text(
+                                  otherCodeName(code),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 11, color: AppColors.slate),
+                                ),
+                              ),
+                            ],
+                          ),
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              lb > 0 ? '${formatLb(lb)} lb' : '—',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.navy,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            formatMoney(paid),
+                            style: const TextStyle(fontSize: 11.5, color: AppColors.slate),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -1549,10 +1675,45 @@ class MaterialStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final codes = totals.otherCodeRows;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _mainRow(),
+        if (codes.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 5,
+            runSpacing: 5,
+            children: [
+              for (final (code, lb, paid) in codes)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppColors.purpleTint,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: Text(
+                    '${otherCodeLabel(code)} ${lb > 0 ? '${formatLb(lb)} lb' : formatMoney(paid)}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.purpleText,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _mainRow() {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final (label, lb, paid) in totals.rows)
+        for (final (label, lb, paid) in totals.mainRows)
           Expanded(
             child: Opacity(
               opacity: lb > 0 || paid > 0 ? 1 : 0.4,

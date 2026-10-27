@@ -607,7 +607,12 @@ class _MaterialsCard extends ConsumerWidget {
               ),
               const SizedBox(height: 14),
               // Totals per material
-              _MaterialTotalsRow(t: o.materialsTotal, columns: wide ? 4 : 2, width: c.maxWidth),
+              // Aluminum · Glass · PETE first and biggest, then Other by code
+              _MaterialTotalsRow(t: o.materialsTotal, columns: 3, width: c.maxWidth),
+              if (o.materialsTotal.otherCodeRows.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                OtherCodeTiles(totals: o.materialsTotal, columns: wide ? 6 : 3),
+              ],
               const SizedBox(height: 16),
               if (ids.isEmpty)
                 const Padding(
@@ -688,7 +693,7 @@ class _MaterialTotalsRow extends StatelessWidget {
       spacing: gap,
       runSpacing: gap,
       children: [
-        for (final (label, lb, paid) in t.rows)
+        for (final (label, lb, paid) in t.mainRows)
           SizedBox(
             width: w,
             child: Container(
@@ -722,14 +727,17 @@ class _MaterialTotalsRow extends StatelessWidget {
                     tween: Tween(begin: 0, end: lb),
                     duration: reduce ? Duration.zero : const Duration(milliseconds: 700),
                     curve: Curves.easeOutCubic,
-                    builder: (context, v, _) => Text(
-                      '${formatLb(v)} lb',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w700,
-                        color: kMaterialStyles[label]!.text,
+                    builder: (context, v, _) => FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        '${formatLb(v)} lb',
+                        maxLines: 1,
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w800,
+                          color: kMaterialStyles[label]!.text,
+                        ),
                       ),
                     ),
                   ),
@@ -789,6 +797,30 @@ class _MaterialsTable extends StatelessWidget {
     );
   }
 
+  /// Other commodities by code, one short line each ("#2 42.6 lb").
+  Widget _codesCell(MaterialTotals t, {bool bold = false}) {
+    final codes = t.otherCodeRows;
+    return Expanded(
+      flex: 3,
+      child: codes.isEmpty
+          ? const Text('—', textAlign: TextAlign.right, style: TextStyle(color: AppColors.navy))
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                for (final (code, lb, paid) in codes)
+                  Text(
+                    '${otherCodeLabel(code)}  ${lb > 0 ? '${formatLb(lb)} lb' : formatMoney(paid)}',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: bold ? FontWeight.w800 : FontWeight.w600,
+                      color: AppColors.purpleText,
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
   Widget _row(String label, Widget lead, MaterialTotals t, {bool bold = false, Color? bg}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
@@ -799,8 +831,9 @@ class _MaterialsTable extends StatelessWidget {
       child: Row(
         children: [
           Expanded(flex: 3, child: lead),
-          for (final (name, lb, paid) in t.rows)
+          for (final (name, lb, paid) in t.mainRows)
             _cell(lb, paid, bold: bold, color: lb > 0 ? kMaterialStyles[name]!.text : null),
+          _codesCell(t, bold: bold),
           Expanded(
             flex: 2,
             child: Text(
@@ -827,7 +860,7 @@ class _MaterialsTable extends StatelessWidget {
           child: Row(
             children: [
               const Expanded(flex: 3, child: Text('LOCATION', style: _hdr)),
-              for (final name in kMaterialStyles.keys)
+              for (final name in kMaterialStyles.keys.take(3))
                 Expanded(
                   flex: 2,
                   child: Text(
@@ -836,6 +869,14 @@ class _MaterialsTable extends StatelessWidget {
                     style: _hdr.copyWith(color: kMaterialStyles[name]!.text),
                   ),
                 ),
+              Expanded(
+                flex: 3,
+                child: Text(
+                  'OTHER BY CODE',
+                  textAlign: TextAlign.right,
+                  style: _hdr.copyWith(color: AppColors.purpleText),
+                ),
+              ),
               const Expanded(
                 flex: 2,
                 child: Text('TOTAL PAID', textAlign: TextAlign.right, style: _hdr),

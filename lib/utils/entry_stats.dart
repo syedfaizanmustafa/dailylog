@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../models/location_prices.dart';
 import 'sheet_cell_numeric.dart';
 
 /// Read-only summary of one submitted `entries/{id}` document, computed the
@@ -27,6 +28,11 @@ class EntrySummary {
   final double glassPaid;
   final double petePaid;
   final double otherPaid;
+
+  /// Other commodities split by the row's CODE (column 15): SW pounds and
+  /// dollars per code. Rows with no code are under '' ("No code").
+  final Map<String, double> otherSWByCode;
+  final Map<String, double> otherPaidByCode;
   final List<String> customerNames;
 
   const EntrySummary({
@@ -51,6 +57,8 @@ class EntrySummary {
     this.glassPaid = 0,
     this.petePaid = 0,
     this.otherPaid = 0,
+    this.otherSWByCode = const {},
+    this.otherPaidByCode = const {},
     required this.customerNames,
   });
 
@@ -78,6 +86,8 @@ class EntrySummary {
         glassPaid: glassPaid,
         petePaid: petePaid,
         otherPaid: otherPaid,
+        otherSWByCode: otherSWByCode,
+        otherPaidByCode: otherPaidByCode,
         customerNames: customerNames,
       );
 
@@ -107,6 +117,8 @@ class EntrySummary {
     double alP = 0, glP = 0, peP = 0, otP = 0;
     int customers = 0;
     final names = <String>[];
+    final otByCode = <String, double>{};
+    final otPByCode = <String, double>{};
 
     final nameIndex = data['customerNamesIndex'] is Map
         ? Map<String, dynamic>.from(data['customerNamesIndex'] as Map)
@@ -149,8 +161,14 @@ class EntrySummary {
         al += n(0);
         gl += n(5);
         pe += n(10);
-        ot += n(16);
+        final o16 = n(16);
+        ot += o16;
         final a4 = n(4), g9 = n(9), p14 = n(14), o19 = n(19);
+        if (o16 > 0 || o19 > 0) {
+          final code = normalizeOtherCode(cell(15));
+          otByCode[code] = (otByCode[code] ?? 0) + o16;
+          otPByCode[code] = (otPByCode[code] ?? 0) + o19;
+        }
         alP += a4;
         glP += g9;
         peP += p14;
@@ -201,6 +219,8 @@ class EntrySummary {
       glassPaid: glP,
       petePaid: peP,
       otherPaid: otP,
+      otherSWByCode: otByCode,
+      otherPaidByCode: otPByCode,
       customerNames: names,
     );
   }
@@ -210,6 +230,10 @@ class EntrySummary {
 class MaterialTotals {
   double aluminiumLb = 0, glassLb = 0, peteLb = 0, otherLb = 0;
   double aluminiumPaid = 0, glassPaid = 0, petePaid = 0, otherPaid = 0;
+
+  /// Other commodities by CODE ('' = no code picked).
+  final Map<String, double> otherLbByCode = {};
+  final Map<String, double> otherPaidByCode = {};
   int sheets = 0;
   int customers = 0;
 
@@ -225,6 +249,8 @@ class MaterialTotals {
     glassPaid += e.glassPaid;
     petePaid += e.petePaid;
     otherPaid += e.otherPaid;
+    _merge(otherLbByCode, e.otherSWByCode);
+    _merge(otherPaidByCode, e.otherPaidByCode);
     sheets += e.sheetCount;
     customers += e.customers;
   }
@@ -238,6 +264,8 @@ class MaterialTotals {
     glassPaid += o.glassPaid;
     petePaid += o.petePaid;
     otherPaid += o.otherPaid;
+    _merge(otherLbByCode, o.otherLbByCode);
+    _merge(otherPaidByCode, o.otherPaidByCode);
     sheets += o.sheets;
     customers += o.customers;
   }
@@ -249,4 +277,44 @@ class MaterialTotals {
         ('PETE plastic', peteLb, petePaid),
         ('Other', otherLb, otherPaid),
       ];
+
+  /// Aluminum, Glass, PETE plastic: always first, always in this order.
+  List<(String, double, double)> get mainRows => rows.sublist(0, 3);
+
+  /// Other commodities by code, heaviest first (then by dollars). Only codes
+  /// that were used.
+  List<(String, double, double)> get otherCodeRows {
+    final codes = {...otherLbByCode.keys, ...otherPaidByCode.keys};
+    final list = [
+      for (final c in codes)
+        (c, otherLbByCode[c] ?? 0.0, otherPaidByCode[c] ?? 0.0),
+    ].where((r) => r.$2 > 0 || r.$3 > 0).toList()
+      ..sort((a, b) {
+        final byLb = b.$2.compareTo(a.$2);
+        return byLb != 0 ? byLb : b.$3.compareTo(a.$3);
+      });
+    return list;
+  }
+
+  static void _merge(Map<String, double> into, Map<String, double> from) {
+    from.forEach((k, v) => into[k] = (into[k] ?? 0.0) + v);
+  }
+}
+
+/// Sheet CODE cell → the code used for grouping ('P#2', 'CC', …; '' = none).
+String normalizeOtherCode(String raw) => raw.trim().toUpperCase();
+
+/// Short label for a code, as staff say it: P#2 → #2, CC → CC, '' → No code.
+String otherCodeLabel(String code) {
+  if (code.isEmpty) return 'No code';
+  if (code.startsWith('P#')) return code.substring(1);
+  return code;
+}
+
+/// Plain name for a code from the sheet legend (P#2 → HDPE), or ''.
+String otherCodeName(String code) {
+  for (final (c, name) in kOtherCommodityCodes) {
+    if (c == code) return name;
+  }
+  return '';
 }
