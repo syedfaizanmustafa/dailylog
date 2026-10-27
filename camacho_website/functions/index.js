@@ -59,6 +59,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// Server time on every receipt write so the app's delta sync picks the change
+// up (see lib/services/data_sync.dart).
+function syncedAt() {
+  return admin.firestore.FieldValue.serverTimestamp();
+}
+
 /**
  * Atomically moves `receipts/{id}.{channel}.status` from "pending" to
  * "sending". Returns the receipt data if this invocation won the claim,
@@ -74,13 +80,14 @@ async function claim(ref, channel) {
     tx.update(ref, {
       [`${channel}.status`]: "sending",
       [`${channel}.updatedAt`]: nowIso(),
+      syncedAt: syncedAt(),
     });
     return data;
   });
 }
 
 async function setStatus(ref, channel, fields) {
-  const update = { [`${channel}.updatedAt`]: nowIso() };
+  const update = { [`${channel}.updatedAt`]: nowIso(), syncedAt: syncedAt() };
   for (const [k, v] of Object.entries(fields)) {
     update[`${channel}.${k}`] = v;
   }

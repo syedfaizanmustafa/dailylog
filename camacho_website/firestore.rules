@@ -43,8 +43,30 @@ service cloud.firestore {
       // and token) after a log sheet is edited.
       allow update: if isAdmin() || (signedIn()
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['sms', 'email', 'printed', 'customerId', 'entryId', 'sheetNumber']));
+             .hasOnly(['sms', 'email', 'printed', 'customerId', 'entryId', 'sheetNumber', 'syncedAt']));
       allow delete: if isAdmin();
+
+      // The customer's signature, kept apart so lists of receipts stay small.
+      // Written once when the receipt is issued; admins may replace it when
+      // reissuing.
+      match /private/{docId} {
+        allow read, create: if signedIn();
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // App-wide switches (e.g. receipts.signaturesMoved, set by
+    // "Speed up receipts").
+    match /appSettings/{docId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Markers left when an admin deletes a log sheet, so other devices drop
+    // it from their cache on the next sync.
+    match /deletions/{docId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
     }
 
     // Sequential receipt counter (transaction from the app).
