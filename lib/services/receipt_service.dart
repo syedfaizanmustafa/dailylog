@@ -7,6 +7,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import '../config/receipt_config.dart';
 import '../models/receipt.dart';
 import '../utils/receipt_code.dart';
+import 'data_sync.dart';
 import 'receipt_pdf_service.dart';
 
 /// Issues receipts (sequential number + PDF in Storage + Firestore doc) and
@@ -89,8 +90,123 @@ class ReceiptService {
           ),
         );
 
-    await docRef.set(issued.toFirestore());
+    // Receipt + its signature in one atomic write. Until "Speed up receipts"
+    // has run, the signature is also kept inline for older app versions.
+    final inline = await _inlineSignatures();
+    final batch = _db.batch();
+    batch.set(docRef, {
+      ...issued.toFirestore(),
+      if (inline && issued.signature.isNotEmpty)
+        'signature': issued.signature.map((p) => p.toMap()).toList(),
+      kSyncedAt: syncedNow(),
+    });
+    if (issued.signature.isNotEmpty) {
+      batch.set(_signatureRef(docRef.id), _signatureDoc(issued.signature));
+    }
+    await batch.commit();
+    SyncedCollection.receipts.touch();
     return issued;
+  }
+
+  // ── Signature (kept out of the receipt document) ───────────────────────
+
+  static DocumentReference<Map<String, dynamic>> get _settingsRef =>
+      _db.collection('appSettings').doc('receipts');
+
+  /// True until an admin has run "Speed up receipts". Until then every
+  /// device may still be on an older app version that reads the signature
+  /// from the receipt itself, so new receipts keep an inline copy too.
+  static Future<bool> _inlineSignatures() async {
+    try {
+      final d = await _settingsRef.get();
+      return d.data()?['signaturesMoved'] != true;
+    } catch (_) {
+      return true; // can't tell: keep the safe (inline) copy
+    }
+  }
+
+  static DocumentReference<Map<String, dynamic>> _signatureRef(String receiptId) =>
+      _receipts.doc(receiptId).collection('private').doc('signature');
+
+  static Map<String, dynamic> _signatureDoc(List<ReceiptSignaturePoint> points) => {
+        'points': points.map((p) => p.toMap()).toList(),
+        kSyncedAt: syncedNow(),
+      };
+
+  /// Stroke points of an issued receipt: from its own signature document, or
+  /// from the receipt itself for receipts saved before the move.
+  static Future<List<ReceiptSignaturePoint>> loadSignature(String receiptId) async {
+    final doc = await _signatureRef(receiptId).get();
+    final raw = doc.data()?['points'];
+    if (raw is List && raw.isNotEmpty) {
+      return [
+        for (final e in raw)
+          if (e is Map) ReceiptSignaturePoint.fromMap(Map<String, dynamic>.from(e)),
+      ];
+    }
+    final legacy = await _receipts.doc(receiptId).get();
+    final old = legacy.data()?['signature'];
+    if (old is List) {
+      return [
+        for (final e in old)
+          if (e is Map) ReceiptSignaturePoint.fromMap(Map<String, dynamic>.from(e)),
+      ];
+    }
+    return const [];
+  }
+
+  /// [r] with its signature loaded (no-op for drafts and receipts that
+  /// already have it).
+  static Future<ReceiptData> withSignature(ReceiptData r) async {
+    if (r.signature.isNotEmpty || r.id == null) return r;
+    final points = await loadSignature(r.id!);
+    return points.isEmpty ? r : r.copyWith(signature: points);
+  }
+
+  /// One-time move of signatures stored inside older receipt documents into
+  /// their own document, so lists of receipts download ~1 KB per receipt
+  /// instead of ~10–50 KB. Copy and removal happen in the same atomic batch,
+  /// per receipt. Safe to run again (it skips receipts already moved).
+  /// Returns how many receipts were moved.
+  ///
+  /// Only run once every iPad and phone has this app version: older versions
+  /// read the signature from the receipt document. From then on new receipts
+  /// are saved without the inline copy.
+  static Future<int> moveOldSignatures({void Function(int done, int total)? onProgress}) async {
+    // Flag first, so receipts issued while this runs are already saved the
+    // new way and none is missed.
+    await _settingsRef.set({
+      'signaturesMoved': true,
+      'movedAt': DateTime.now().toIso8601String(),
+    }, SetOptions(merge: true));
+    final snap = await _receipts.get(const GetOptions(source: Source.server));
+    final todo = snap.docs.where((d) {
+      final sig = d.data()['signature'];
+      return sig is List && sig.isNotEmpty;
+    }).toList();
+    var done = 0;
+    onProgress?.call(0, todo.length);
+    // 2 writes per receipt, each carrying the signature: 50 receipts per
+    // batch stays well under Firestore's 500-write and 10 MB request limits.
+    const chunk = 50;
+    for (var i = 0; i < todo.length; i += chunk) {
+      final batch = _db.batch();
+      for (final d in todo.skip(i).take(chunk)) {
+        batch.set(_signatureRef(d.id), {
+          'points': d.data()['signature'],
+          kSyncedAt: syncedNow(),
+        });
+        batch.update(d.reference, {
+          'signature': FieldValue.delete(),
+          kSyncedAt: syncedNow(),
+        });
+      }
+      await batch.commit();
+      done = min(i + chunk, todo.length);
+      onProgress?.call(done, todo.length);
+    }
+    SyncedCollection.receipts.touch();
+    return done;
   }
 
   /// `LL-YYMMDD-SS-RR` for a draft; adds `-2`, `-3`… if that exact code was
@@ -142,7 +258,8 @@ class ReceiptService {
       createdAt: existing.createdAt,
       createdBy: existing.createdBy,
     );
-    final bytes = await ReceiptPdfService.build(updated);
+    final full = await withSignature(updated);
+    final bytes = await ReceiptPdfService.build(full);
     await _storage.ref(path).putData(
           bytes,
           SettableMetadata(
@@ -162,15 +279,35 @@ class ReceiptService {
       ..remove('printed')
       ..remove('createdAt')
       ..remove('createdBy');
-    await _receipts.doc(id).update({
+    final inline = await _inlineSignatures();
+    final batch = _db.batch();
+    batch.update(_receipts.doc(id), {
       ...data,
       'reissuedAt': DateTime.now().toIso8601String(),
+      // Inline copy only until "Speed up receipts" has run (older app
+      // versions read it); after that the signature doc is the only copy.
+      'signature': inline && full.signature.isNotEmpty
+          ? full.signature.map((p) => p.toMap()).toList()
+          : FieldValue.delete(),
+      kSyncedAt: syncedNow(),
     });
-    return updated;
+    if (full.signature.isNotEmpty) {
+      batch.set(_signatureRef(id), _signatureDoc(full.signature));
+    }
+    await batch.commit();
+    SyncedCollection.receipts.touch();
+    return full;
   }
 
   /// Regenerates the PDF bytes for preview/print without touching Storage.
-  static Future<Uint8List> render(ReceiptData r) => ReceiptPdfService.build(r);
+  /// Loads the signature first if [r] doesn't have it.
+  static Future<Uint8List> render(ReceiptData r) async =>
+      ReceiptPdfService.build(await withSignature(r));
+
+  /// Quick PDF without the signature (a grey box marks its place), shown
+  /// while the signature loads.
+  static Future<Uint8List> renderWithoutSignature(ReceiptData r) =>
+      ReceiptPdfService.build(r, signaturePending: true);
 
   /// Looks for an already-issued receipt for the same sheet cell.
   static Future<ReceiptData?> findForCell(ReceiptData d) async {
@@ -226,6 +363,7 @@ class ReceiptService {
         status: 'pending',
         updatedAt: DateTime.now(),
       ).toMap(),
+      kSyncedAt: syncedNow(),
     });
   }
 
@@ -237,11 +375,12 @@ class ReceiptService {
         status: 'pending',
         updatedAt: DateTime.now(),
       ).toMap(),
+      kSyncedAt: syncedNow(),
     });
   }
 
   static Future<void> markPrinted(String receiptId) =>
-      _receipts.doc(receiptId).update({'printed': true});
+      _receipts.doc(receiptId).update({'printed': true, kSyncedAt: syncedNow()});
 
   /// Saves the customer's ID number and regenerates the stored PDF so the
   /// hosted/texted copy matches what is printed.
@@ -249,7 +388,7 @@ class ReceiptService {
     ReceiptData r,
     String customerId,
   ) async {
-    final updated = r.copyWith(customerId: customerId.trim());
+    final updated = (await withSignature(r)).copyWith(customerId: customerId.trim());
     if (updated.id == null) return updated;
     if (updated.pdfPath != null) {
       final bytes = await ReceiptPdfService.build(updated);
@@ -258,7 +397,9 @@ class ReceiptService {
             SettableMetadata(contentType: 'application/pdf'),
           );
     }
-    await _receipts.doc(updated.id!).update({'customerId': updated.customerId});
+    await _receipts
+        .doc(updated.id!)
+        .update({'customerId': updated.customerId, kSyncedAt: syncedNow()});
     return updated;
   }
 
@@ -277,6 +418,7 @@ class ReceiptService {
       batch.update(_receipts.doc(receiptId), {
         'entryId': entryId,
         'sheetNumber': sheetNumberMapping[oldSheet] ?? oldSheet,
+        kSyncedAt: syncedNow(),
       });
     });
     await batch.commit();

@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -12,6 +13,8 @@ import '../controllers/app_controller.dart';
 import '../utils/entry_stats.dart';
 import '../widgets/admin_shell.dart';
 import '../widgets/floating_confirmation_sheet.dart';
+import '../services/data_sync.dart';
+import '../widgets/shimmer.dart';
 
 /// Admin › Log sheets: table of submitted entries with status filters,
 /// multi-select approve/delete, paging and CSV copy.
@@ -44,7 +47,17 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
   int? _rangeDays;
 
   List<EntrySummary> _rows = [];
-  DocumentSnapshot<Map<String, dynamic>>? _cursor;
+  /// All entries, newest first, for local paging in the default view.
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _pageSource = const [];
+
+  /// The synced lists the screen was last built from (to skip rebuilding
+  /// when a background refresh brings nothing new).
+  List<QueryDocumentSnapshot<Map<String, dynamic>>>? _appliedEntries;
+  List<QueryDocumentSnapshot<Map<String, dynamic>>>? _appliedReceipts;
+
+  /// How far into [_pageSource] the shown pages reach (rows removed after a
+  /// delete don't shift it).
+  int _pageEnd = 0;
   bool _hasMore = false;
   bool _loading = true;
   bool _loadingMore = false;
@@ -65,8 +78,18 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
-    _loadCounts();
+    // Already synced this session: the tab appears at once (shimmer for a
+    // frame), then the list is built from memory and refreshed quietly.
+    final e = SyncedCollection.entries.peek, r = SyncedCollection.receipts.peek;
+    if (e != null && r != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _apply(e, r));
+        _load(silent: true);
+      });
+    } else {
+      _load();
+    }
   }
 
   @override
@@ -85,126 +108,153 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
 
   // ── Data ────────────────────────────────────────────────────────────────
 
-  Future<void> _loadCounts() async {
-    try {
-      final r = await Future.wait([
-        _col.count().get(),
-        _col.where('approved', isEqualTo: true).count().get(),
-        _col.where('approved', isEqualTo: false).count().get(),
-      ]);
-      if (!mounted) return;
-      setState(() {
-        _countAll = r[0].count;
-        _countApproved = r[1].count;
-        _countPending = r[2].count;
-      });
-    } catch (_) {
-      // Counts are decoration; the list still works without them.
-    }
+  static EntrySummary _summary(QueryDocumentSnapshot<Map<String, dynamic>> d) =>
+      EntrySummary.fromMap(d.id, syncedData(d));
+
+  static String _dayKey(Map<String, dynamic> d) {
+    final k = d['entryDateKey']?.toString() ?? '';
+    if (k.isNotEmpty) return k;
+    final c = d['createdAt']?.toString() ?? '';
+    return c.length >= 10 ? c.substring(0, 10) : c;
   }
 
-  Future<void> _load({bool more = false}) async {
+  static int _newestFirst(
+    QueryDocumentSnapshot<Map<String, dynamic>> a,
+    QueryDocumentSnapshot<Map<String, dynamic>> b,
+  ) {
+    final da = syncedData(a), db = syncedData(b);
+    final byDay = _dayKey(db).compareTo(_dayKey(da));
+    if (byDay != 0) return byDay;
+    return (db['createdAt']?.toString() ?? '').compareTo(da['createdAt']?.toString() ?? '');
+  }
+
+  /// Entries come from the on-device cache plus only what changed since the
+  /// last sync (services/data_sync.dart); filtering and paging happen here.
+  /// [silent]: refresh in the background, keeping the current list on
+  /// screen (no shimmer).
+  Future<void> _load({bool more = false, bool silent = false}) async {
     if (more) {
       if (_loadingMore || !_hasMore) return;
-      setState(() => _loadingMore = true);
-    } else {
+      final next = _pageSource.skip(_pageEnd).take(_pageSize).map(_summary).toList();
+      setState(() {
+        _rows = [..._rows, ...next];
+        _pageEnd += next.length;
+        _hasMore = _pageEnd < _pageSource.length;
+      });
+      return;
+    }
+    if (!silent) {
       setState(() {
         _loading = true;
         _error = null;
         _selected.clear();
-        _cursor = null;
       });
     }
 
     try {
-      List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
-      var hasMore = false;
-
-      if (_rangeDays != null) {
-        final fmt = DateFormat('yyyy-MM-dd');
-        final now = DateTime.now();
-        final today = DateTime(now.year, now.month, now.day);
-        final start = today.subtract(Duration(days: _rangeDays! - 1));
-        final snap = await _col
-            .where('entryDateKey', isGreaterThanOrEqualTo: fmt.format(start))
-            .where('entryDateKey', isLessThanOrEqualTo: fmt.format(today))
-            .get();
-        docs = snap.docs;
-      } else if (_filter == 'pending') {
-        final snap = await _col.where('approved', isEqualTo: false).get();
-        docs = snap.docs;
-      } else if (_locationIds.isNotEmpty) {
-        // Chosen locations, all dates: whereIn in chunks of 30 (no composite
-        // index needed), sorted below.
-        final ids = _locationIds.toList();
-        docs = [];
-        for (var i = 0; i < ids.length; i += 30) {
-          final part = await _col
-              .where('location', whereIn: ids.sublist(i, i + 30 > ids.length ? ids.length : i + 30))
-              .get();
-          docs.addAll(part.docs);
-        }
-      } else {
-        Query<Map<String, dynamic>> q =
-            _col.orderBy('createdAt', descending: true).limit(_pageSize);
-        if (more && _cursor != null) q = q.startAfterDocument(_cursor!);
-        final snap = await q.get();
-        docs = snap.docs;
-        hasMore = docs.length == _pageSize;
-        if (docs.isNotEmpty) _cursor = docs.last;
-      }
-
-      final batch = docs.map(EntrySummary.fromDoc).toList();
-      await _loadReceiptCounts(batch.map((e) => e.id).toList());
-
+      final synced = await Future.wait([
+        SyncedCollection.entries.load(),
+        SyncedCollection.receipts.load(),
+      ]);
       if (!mounted) return;
-      setState(() {
-        final merged = more ? [..._rows, ...batch] : batch;
-        merged.sort((a, b) {
-          final byDay = b.dateKey.compareTo(a.dateKey);
-          return byDay != 0 ? byDay : b.createdAt.compareTo(a.createdAt);
-        });
-        _rows = merged;
-        _hasMore = hasMore;
-        _loading = false;
-        _loadingMore = false;
-      });
+      // Background refresh and nothing changed: keep the list as it is.
+      if (silent && identical(synced[0], _appliedEntries) && identical(synced[1], _appliedReceipts)) {
+        return;
+      }
+      setState(() => _apply(synced[0], synced[1], keepPages: silent));
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = friendlyError(e);
+        // Background refresh failed: keep the list; show the error only if
+        // there's nothing to show.
+        if (!silent || _rows.isEmpty) _error = friendlyError(e);
         _loading = false;
         _loadingMore = false;
       });
     }
   }
 
-  Future<void> _loadReceiptCounts(List<String> entryIds) async {
-    final receipts = FirebaseFirestore.instance.collection('receipts');
-    for (var i = 0; i < entryIds.length; i += 30) {
-      final chunk = entryIds.sublist(
-          i, i + 30 > entryIds.length ? entryIds.length : i + 30);
-      try {
-        final snap = await receipts.where('entryId', whereIn: chunk).get();
-        for (final id in chunk) {
-          _receipts[id] = _ReceiptCounts();
-        }
-        for (final doc in snap.docs) {
-          final d = doc.data();
-          final entryId = d['entryId']?.toString();
-          if (entryId == null) continue;
-          final c = _receipts.putIfAbsent(entryId, _ReceiptCounts.new);
-          final sms = d['sms'];
-          if (sms is Map && sms['requested'] == true) c.sms++;
-          if (d['printed'] == true) c.printed++;
-          final n = (d['receiptNumber'] as num?)?.toInt();
-          if (n != null) c.numbers.add(n);
-          final code = d['receiptCode']?.toString() ?? '';
-          if (code.isNotEmpty) c.codes.add(code);
-        }
-      } catch (_) {
-        // Receipt counts are optional — skip on error.
-      }
+  /// Builds the list from synced entries/receipts (call inside setState).
+  /// [keepPages]: keep as many pages as are shown now (background refresh).
+  void _apply(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> entries,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> receipts, {
+    bool keepPages = false,
+  }) {
+    _appliedEntries = entries;
+    _appliedReceipts = receipts;
+    var docs = entries;
+    var paged = false;
+
+    if (_rangeDays != null) {
+      final fmt = DateFormat('yyyy-MM-dd');
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final from = fmt.format(today.subtract(Duration(days: _rangeDays! - 1)));
+      final to = fmt.format(today);
+      docs = docs.where((d) {
+        final k = syncedData(d)['entryDateKey']?.toString() ?? '';
+        return k.isNotEmpty && k.compareTo(from) >= 0 && k.compareTo(to) <= 0;
+      }).toList();
+    } else if (_filter == 'pending') {
+      docs = docs.where((d) => syncedData(d)['approved'] == false).toList();
+    } else if (_locationIds.isNotEmpty) {
+      docs = docs.where((d) => _locationIds.contains(syncedData(d)['location']?.toString())).toList();
+    } else {
+      paged = true;
+    }
+    docs = [...docs]..sort(_newestFirst);
+
+    _countReceipts(receipts);
+    final take = keepPages && paged ? max(_pageSize, _pageEnd) : _pageSize;
+    final first = (paged ? docs.take(take) : docs).map(_summary).toList();
+
+    final visibleIds = first.map((r) => r.id).toSet();
+    _selected.removeWhere((id) => !visibleIds.contains(id));
+    _pageSource = paged ? docs : const [];
+    _pageEnd = first.length;
+    _rows = first;
+    _hasMore = paged && first.length < docs.length;
+    _loading = false;
+    _loadingMore = false;
+    _error = null;
+
+    var approved = 0, pending = 0;
+    for (final d in entries) {
+      final a = syncedData(d)['approved'];
+      if (a == true) approved++;
+      if (a == false) pending++;
+    }
+    _countAll = entries.length;
+    _countApproved = approved;
+    _countPending = pending;
+  }
+
+  /// Filters changed: rebuild from what's in memory (instant), else load.
+  void _reapply() {
+    final e = SyncedCollection.entries.peek, r = SyncedCollection.receipts.peek;
+    if (e == null || r == null) {
+      _load();
+      return;
+    }
+    setState(() => _apply(e, r));
+  }
+
+  /// Receipt counts / numbers per entry, from the synced receipts.
+  void _countReceipts(List<QueryDocumentSnapshot<Map<String, dynamic>>> receipts) {
+    _receipts.clear();
+    for (final doc in receipts) {
+      final d = syncedData(doc);
+      final entryId = d['entryId']?.toString();
+      if (entryId == null) continue;
+      final c = _receipts.putIfAbsent(entryId, _ReceiptCounts.new);
+      final sms = d['sms'];
+      if (sms is Map && sms['requested'] == true) c.sms++;
+      if (d['printed'] == true) c.printed++;
+      final n = (d['receiptNumber'] as num?)?.toInt();
+      if (n != null) c.numbers.add(n);
+      final code = d['receiptCode']?.toString() ?? '';
+      if (code.isNotEmpty) c.codes.add(code);
     }
   }
 
@@ -222,7 +272,8 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         }
       });
       ref.invalidate(pendingApprovalCountProvider);
-      _loadCounts();
+      SyncedCollection.entries.touch();
+      _load(silent: true);
     } catch (_) {}
   }
 
@@ -237,6 +288,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         batch.update(_col.doc(id), {
           'approved': true,
           'updatedAt': FieldValue.serverTimestamp(),
+          kSyncedAt: syncedNow(),
         });
       }
       await batch.commit();
@@ -257,7 +309,10 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         ids.length == 1 ? 'Sheet approved' : '${ids.length} sheets approved',
       );
       ref.invalidate(pendingApprovalCountProvider);
-      _loadCounts();
+      // Refresh the session copy too, so a filter change right after
+      // doesn't show the old state.
+      SyncedCollection.entries.touch();
+      _load(silent: true);
     } catch (e) {
       if (mounted) showAppSnack(context, friendlyError(e), error: true);
     } finally {
@@ -278,11 +333,18 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
     if (!ok || !mounted) return;
     setState(() => _busy.addAll(ids));
     try {
-      final batch = FirebaseFirestore.instance.batch();
-      for (final id in ids) {
-        batch.delete(_col.doc(id));
+      // 2 writes per sheet (sheet + deletion marker): 200 sheets per batch
+      // stays under Firestore's 500-write limit.
+      for (var i = 0; i < ids.length; i += 200) {
+        final batch = FirebaseFirestore.instance.batch();
+        for (final id in ids.skip(i).take(200)) {
+          batch.delete(_col.doc(id));
+          // Marker so other admins' cached copies drop this sheet too.
+          SyncedCollection.markDeleted(batch, 'entries', id);
+        }
+        await batch.commit();
       }
-      await batch.commit();
+      SyncedCollection.entries.dropLocal(ids);
       if (!mounted) return;
       setState(() {
         _rows.removeWhere((r) => ids.contains(r.id));
@@ -293,7 +355,10 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         ids.length == 1 ? 'Sheet deleted' : '${ids.length} sheets deleted',
       );
       ref.invalidate(pendingApprovalCountProvider);
-      _loadCounts();
+      // Refresh the session copy too, so a filter change right after
+      // doesn't show the old state.
+      SyncedCollection.entries.touch();
+      _load(silent: true);
     } catch (e) {
       if (mounted) showAppSnack(context, friendlyError(e), error: true);
     } finally {
@@ -357,13 +422,13 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
       _filter = f;
       _selected.clear();
     });
-    if (needsReload) _load();
+    if (needsReload) _reapply();
   }
 
   void _setRange(int? days) {
     if (days == _rangeDays) return;
     setState(() => _rangeDays = days);
-    _load();
+    _reapply();
   }
 
   String _staffName(EntrySummary r, Map<String, AdminUser> users) {
@@ -419,6 +484,16 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // "Refresh all data" / signature move finished: reload.
+    ref.listen<int>(syncTickProvider, (_, __) => _load(silent: true));
+    // Shown again from the tab bar: refresh quietly in the background.
+    ref.listen<(String, int)>(adminTabShownProvider, (_, next) {
+      final u = Uri.parse(next.$1);
+      if (u.path != '/admin/logs') return;
+      final f = u.queryParameters['filter'];
+      if (f != null) _setFilter(f); // e.g. an Overview "pending" card
+      _load(silent: true);
+    });
     final users = {
       for (final u in ref.watch(adminUsersProvider).valueOrNull ?? const <AdminUser>[])
         u.id: u,
@@ -477,8 +552,8 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
         IconButton(
           tooltip: 'Refresh',
           onPressed: () {
-            _load();
-            _loadCounts();
+            SyncedCollection.touchAll();
+            _load(silent: true);
             ref.invalidate(pendingApprovalCountProvider);
           },
           icon: const Icon(Icons.refresh_rounded, color: AppColors.navy),
@@ -512,7 +587,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
                       _selected.clear();
                     });
                     // All dates are loaded per location from the server.
-                    if (_rangeDays == null && _filter != 'pending') _load();
+                    if (_rangeDays == null && _filter != 'pending') _reapply();
                   },
                 ),
                 const SizedBox(width: 4, height: 24, child: VerticalDivider(color: AppColors.field)),
@@ -607,13 +682,7 @@ class _LogSheetsScreenState extends ConsumerState<LogSheetsScreen> {
     required double hPad,
   }) {
     if (_loading) {
-      return const Center(
-        child: SizedBox(
-          width: 28,
-          height: 28,
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.forest),
-        ),
-      );
+      return SkeletonList(padding: EdgeInsets.symmetric(horizontal: hPad, vertical: 12));
     }
     if (_error != null) {
       return Center(

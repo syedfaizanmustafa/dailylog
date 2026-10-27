@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../controllers/auth_controller.dart';
 import '../utils/sheet_cell_numeric.dart';
+import '../widgets/shimmer.dart';
 
 class SubmittedScreen extends ConsumerStatefulWidget {
   const SubmittedScreen({super.key});
@@ -166,7 +167,7 @@ class _SubmittedScreenState extends ConsumerState<SubmittedScreen> {
             Expanded(
               child:
                   _isLoading
-                      ? const Center(child: CircularProgressIndicator())
+                      ? const SkeletonList()
                       : _entries.isEmpty
                       ? Center(
                         child: Column(

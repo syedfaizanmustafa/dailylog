@@ -20,8 +20,12 @@ import '../widgets/dual_numeric_cell_editor.dart';
 import '../widgets/floating_confirmation_sheet.dart';
 import '../widgets/logout_confirmation_sheet.dart';
 import '../widgets/single_numeric_cell_editor.dart';
+import '../models/location_prices.dart';
 import '../models/receipt.dart';
+import '../widgets/location_price_editor.dart';
 import '../services/receipt_service.dart';
+import '../services/data_sync.dart';
+import '../services/sheet_outbox.dart';
 import 'receipt_screen.dart';
 
 class _TwoDimensionalScrollBehavior extends MaterialScrollBehavior {
@@ -101,6 +105,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
 
   // Loading state for submission
   bool _isSubmitting = false;
+
+  /// Set once the entry is saved in the outbox: from then on the draft must
+  /// not be saved again (it would come back and be submitted twice).
+  bool _submitted = false;
   // Note: refreshed in the later initState after sheet init
 
   // Selected date for the entry
@@ -112,11 +120,29 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
   // Map to store signature points for each sheet
   final Map<int, Map<String, List<Point>>> _sheetsSignaturePoints = {};
 
-  // Price per pound multipliers for auto-calculating Total Paid from SW (weight)
-  // Aluminum: $1.80/lb, Glass: $0.101/lb, Plastic: $1.46/lb. Other commodities = manual only.
-  double _aluminumMultiplier = 1.80;
-  double _glassMultiplier = 0.101;
-  double _plasticMultiplier = 1.46;
+  // Price per pound for auto-calculating Total Paid from SW (weight). These
+  // follow the location's prices (Locations › Prices) live; until they load,
+  // the standard prices (or the ones saved with the draft) are used. A price
+  // change only affects rows entered afterwards: amounts already on the
+  // sheet are never recalculated.
+  double _aluminumMultiplier = LocationPrices.standard.aluminum;
+  double _glassMultiplier = LocationPrices.standard.glass;
+  double _plasticMultiplier = LocationPrices.standard.pete;
+
+  /// Other commodities by CODE (col 15). A code without a price is paid by
+  /// hand, as before.
+  Map<String, double> _otherPrices = const {};
+
+  /// Prices last applied from Firestore, and for which location.
+  LocationPrices? _appliedPrices;
+  String? _pricesLocationId;
+
+  /// 'location' when the location has its own prices, else 'standard'.
+  String _priceSource = 'standard';
+
+  /// Once the entry has rows, its prices are fixed: a price update by an
+  /// admin only applies to entries started after it. Kept with the draft.
+  bool _pricesLocked = false;
 
   /// Admin-selected location override. When non-null, used instead of nearestLocation for display and submission.
   AppLocation? _locationOverride;
@@ -257,6 +283,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
 
   /// Serialize the current sheet state to SharedPreferences.
   Future<void> _saveDraft() async {
+    if (_submitted) return;
     try {
       final prefs = await SharedPreferences.getInstance();
       final sheetsMap = <String, dynamic>{};
@@ -289,6 +316,10 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
         'aluminumMultiplier': _aluminumMultiplier,
         'glassMultiplier': _glassMultiplier,
         'plasticMultiplier': _plasticMultiplier,
+        'otherPrices': _otherPrices,
+        'priceSource': _priceSource,
+        'pricesLocationId': _pricesLocationId,
+        'pricesLocked': _pricesLocked,
         'receiptIds': _receiptIdsByCell,
       };
       if (_locationOverride != null) {
@@ -386,6 +417,13 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
         _plasticMultiplier =
             (draft['plasticMultiplier'] as num).toDouble();
       }
+      final draftOther = draft['otherPrices'];
+      if (draftOther is Map) {
+        _otherPrices = {
+          for (final e in draftOther.entries)
+            if (e.value is num) '${e.key}': (e.value as num).toDouble(),
+        };
+      }
       if (draft['locationOverride'] != null) {
         final loc = draft['locationOverride'] as Map<String, dynamic>;
         _locationOverride = AppLocation(
@@ -396,6 +434,24 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
           latitude: (loc['latitude'] as num).toDouble(),
           longitude: (loc['longitude'] as num).toDouble(),
         );
+      }
+      // A draft with rows keeps the prices it was started with (also drafts
+      // saved before prices were locked). An empty draft takes the
+      // location's current prices on the next build.
+      if (_hasAnyData()) {
+        _pricesLocked = true;
+        _priceSource = draft['priceSource']?.toString() ?? _priceSource;
+        _pricesLocationId = draft['pricesLocationId']?.toString();
+        _appliedPrices = LocationPrices(
+          aluminum: _aluminumMultiplier,
+          glass: _glassMultiplier,
+          pete: _plasticMultiplier,
+          other: _otherPrices,
+        );
+      } else {
+        _pricesLocked = false;
+        _appliedPrices = null;
+        _pricesLocationId = null;
       }
 
       if (mounted) {
@@ -440,6 +496,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
   /// Show a confirmation sheet before leaving, save draft on confirm.
   /// If all sheets are blank, just pops without any confirmation or save.
   Future<void> _handleBackPress() async {
+    if (_submitted || _isSubmitting) return; // finishing a submit
     if (!_hasAnyData()) {
       if (mounted) context.pop();
       return;
@@ -522,10 +579,21 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
   double _parseCellValue(String value) => parseSheetCellNumericValue(value);
 
   /// When an SW (weight) cell is updated, auto-fill the corresponding Total Paid
-  /// for that material: Aluminum (col 0→4), Glass (col 5→9), Plastic (col 10→14).
-  /// Other commodities (col 16) stay manual.
+  /// for that material: Aluminum (col 0→4), Glass (col 5→9), Plastic (col 10→14),
+  /// Other commodities (col 16→19) when the row's CODE has a location price.
+  /// Total Paid can still be changed by hand afterwards (discounts).
   void _updatePaidFromSw(int row, int col, String swValue) {
     if (row >= _currentGridData.length) return;
+    // Just switched location and its prices haven't loaded yet: don't fill
+    // Paid with the previous location's prices (it can be typed by hand).
+    final loc =
+        _locationOverride ?? ref.read(appControllerProvider).nearestLocation;
+    if (!_pricesLocked &&
+        loc != null &&
+        _pricesLocationId != null &&
+        _pricesLocationId != loc.id) {
+      return;
+    }
     while (_currentGridData[row].length < 22) {
       _currentGridData[row].add('');
     }
@@ -536,74 +604,166 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       _currentGridData[row][9] = (weight * _glassMultiplier).toStringAsFixed(2);
     } else if (col == 10) {
       _currentGridData[row][14] = (weight * _plasticMultiplier).toStringAsFixed(2);
+    } else if (col == 16) {
+      final price = _otherPrices[_currentGridData[row][15].trim().toUpperCase()];
+      // No price for this code (or no code yet): stays paid by hand.
+      if (price != null && swValue.trim().isNotEmpty) {
+        _currentGridData[row][19] = (weight * price).toStringAsFixed(2);
+      }
     }
-    // col 16 = Other commodities: no auto-calc
   }
 
-  /// Show dialog to edit the price-per-pound multiplier for a material section.
-  /// [sectionIndex] 0 = Aluminum, 1 = Glass, 2 = Plastic.
-  Future<void> _showEditMultiplierDialog(int sectionIndex) async {
-    String label;
-    double value;
-    switch (sectionIndex) {
-      case 0:
-        label = 'Aluminum (\$/pound)';
-        value = _aluminumMultiplier;
-        break;
-      case 1:
-        label = 'Glass (\$/pound)';
-        value = _glassMultiplier;
-        break;
-      case 2:
-        label = 'Plastic (\$/pound)';
-        value = _plasticMultiplier;
-        break;
-      default:
-        return;
+  /// Applies the location's live prices (called from build) while the entry
+  /// is still empty, then locks them once it has rows: a price update only
+  /// applies to entries started after it. Keeps the current prices while
+  /// they load or if they can't be read.
+  void _syncLocationPrices() {
+    if (_pricesLocked) return;
+    final loc =
+        _locationOverride ?? ref.watch(appControllerProvider).nearestLocation;
+    if (loc != null) {
+      final async = ref.watch(locationPricesProvider(loc.id));
+      if (async.hasValue) {
+        final p = async.value ?? LocationPrices.standard;
+        final source = async.value == null ? 'standard' : 'location';
+        final same = _pricesLocationId == loc.id &&
+            _appliedPrices != null &&
+            _appliedPrices!.sameAs(p) &&
+            _priceSource == source;
+        if (!same) {
+          _aluminumMultiplier = p.aluminum;
+          _glassMultiplier = p.glass;
+          _plasticMultiplier = p.pete;
+          _otherPrices = Map<String, double>.from(p.other);
+          _appliedPrices = p;
+          _pricesLocationId = loc.id;
+          _priceSource = source;
+        }
+      }
     }
-    final controller = TextEditingController(text: value.toString());
-    final result = await showDialog<String>(
+    // Lock once rows exist and this location's prices are in use.
+    if (_appliedPrices != null &&
+        (loc == null || _pricesLocationId == loc.id) &&
+        _hasAnyData()) {
+      _pricesLocked = true;
+    }
+  }
+
+  /// Prices are set by an admin in Locations › Prices. Tapping a section's
+  /// SW header shows them; nobody edits prices on the sheet. Staff can still
+  /// change a row's Total Paid (e.g. for a discount).
+  Future<void> _showPricesInfo() async {
+    final container = ProviderScope.containerOf(context, listen: false);
+    final loc =
+        _locationOverride ?? container.read(appControllerProvider).nearestLocation;
+    final isAdmin =
+        container.read(currentUserRoleProvider).valueOrNull == 'admin';
+    final priced = [
+      for (final (code, label) in kOtherCommodityCodes)
+        if (_otherPrices[code] != null) (code, label, _otherPrices[code]!),
+    ];
+    await showModalBottomSheet<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Edit price: $label'),
-        content: TextField(
-          controller: controller,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: 'e.g. 1.80',
-            border: OutlineInputBorder(),
+      showDragHandle: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                loc == null ? 'Prices' : 'Prices · ${loc.name}',
+                style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700, color: AppColors.navy),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                [
+                  _priceSource == 'location'
+                      ? 'Set by an admin for this location.'
+                      : 'Standard prices (no prices set for this location yet).',
+                  if (_pricesLocked)
+                    'This entry keeps the prices it started with; price updates apply to new entries.',
+                ].join(' '),
+                style: const TextStyle(fontSize: 13, color: AppColors.slate),
+              ),
+              const SizedBox(height: 12),
+              for (final (label, v) in [
+                ('Aluminum', _aluminumMultiplier),
+                ('Glass', _glassMultiplier),
+                ('PETE plastic', _plasticMultiplier),
+                for (final (c, l, pv) in priced) ('$c · $l', pv),
+              ])
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(label, style: const TextStyle(fontSize: 15))),
+                      Text('${LocationPrices.fmt(v)} / lb',
+                          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                    ],
+                  ),
+                ),
+              if (priced.length < kOtherCommodityCodes.length)
+                const Padding(
+                  padding: EdgeInsets.only(top: 4),
+                  child: Text('Other codes without a price are paid by hand.',
+                      style: TextStyle(fontSize: 12.5, color: AppColors.slate)),
+                ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.cream,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'Prices can\'t be changed on the sheet. For a discount, tap the row\'s '
+                  'Total Paid cell and enter the amount paid.',
+                  style: TextStyle(fontSize: 13.5, height: 1.4, color: AppColors.navy),
+                ),
+              ),
+              if (isAdmin && loc != null) ...[
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.sell_outlined),
+                  label: const Text('Edit prices for this location'),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    _openLocationPriceEditor(loc);
+                  },
+                ),
+              ],
+            ],
           ),
-          onSubmitted: (v) => Navigator.pop(context, v),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Save'),
-          ),
-        ],
       ),
     );
-    if (result == null) return;
-    final newVal = double.tryParse(result.trim());
-    if (newVal == null || newVal < 0) return;
-    setState(() {
-      switch (sectionIndex) {
-        case 0:
-          _aluminumMultiplier = newVal;
-          break;
-        case 1:
-          _glassMultiplier = newVal;
-          break;
-        case 2:
-          _plasticMultiplier = newVal;
-          break;
-      }
-    });
+  }
+
+  /// Admin shortcut to Locations › Prices for the sheet's location.
+  Future<void> _openLocationPriceEditor(AppLocation loc) async {
+    final container = ProviderScope.containerOf(context, listen: false);
+    Map<String, (LocationPrices?, List<PriceChange>)> all;
+    try {
+      all = await container.read(allLocationPricesProvider.future);
+    } catch (_) {
+      all = const {};
+    }
+    if (!mounted) return;
+    final locations = container.read(appControllerProvider).locations;
+    await showLocationPriceEditor(
+      context: context,
+      location: loc,
+      current: all[loc.id]?.$1,
+      history: all[loc.id]?.$2 ?? const [],
+      otherLocations: {
+        for (final l in locations)
+          if (l.id != loc.id && all[l.id]?.$1 != null) l.id: (l.name, all[l.id]!.$1!),
+      },
+    );
   }
 
   // Method to calculate totals for each column and update the last row
@@ -798,9 +958,31 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       );
       if (result != null) {
         setState(() {
-          _currentGridData[row][col] = result;
-          if (col == 0 || col == 5 || col == 10) {
-            _updatePaidFromSw(row, col, result);
+          final cells = _currentGridData[row];
+          while (cells.length < 22) {
+            cells.add('');
+          }
+          final oldCode = cells[15].trim().toUpperCase();
+          final oldPrice = _otherPrices[oldCode];
+          cells[col] = result;
+          // A different code re-prices the row's other-commodity SW, but
+          // only if Paid is empty or still the old code's automatic amount:
+          // a typed amount (discount) is never overwritten. A code without
+          // a price clears the old automatic amount so it's typed by hand.
+          final sw = cells[16];
+          final newCode = result.trim().toUpperCase();
+          if (sw.trim().isNotEmpty && newCode != oldCode) {
+            final paid = cells[19].trim();
+            final wasAuto = paid.isEmpty ||
+                (oldPrice != null &&
+                    paid == (_parseCellValue(sw) * oldPrice).toStringAsFixed(2));
+            if (wasAuto) {
+              if (_otherPrices[newCode] != null) {
+                _updatePaidFromSw(row, 16, sw);
+              } else {
+                cells[19] = '';
+              }
+            }
           }
         });
         // Calculate totals after updating the cell
@@ -843,7 +1025,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
       if (result != null) {
         setState(() {
           _currentGridData[row][col] = result;
-          if (col == 0 || col == 5 || col == 10) {
+          if (col == 0 || col == 5 || col == 10 || col == 16) {
             _updatePaidFromSw(row, col, result);
           }
         });
@@ -974,7 +1156,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     if (result != null) {
       setState(() {
         _currentGridData[row][col] = '${result['a']}/${result['b']}';
-        if (col == 0 || col == 5 || col == 10) {
+        if (col == 0 || col == 5 || col == 10 || col == 16) {
           _updatePaidFromSw(row, col, '${result['a']}/${result['b']}');
         }
       });
@@ -988,9 +1170,14 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     String code,
     String description,
   ) {
+    final price = _otherPrices[code];
     return ListTile(
       title: Text(code),
       subtitle: Text(description),
+      trailing: price == null
+          ? const Text('by hand', style: TextStyle(fontSize: 12.5, color: AppColors.slate))
+          : Text('${LocationPrices.fmt(price)}/lb',
+              style: const TextStyle(fontWeight: FontWeight.w700)),
       onTap: () => Navigator.pop(context, code),
     );
   }
@@ -1970,7 +2157,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
               Material(
                 color: Colors.blue[50],
                 child: InkWell(
-                  onTap: () => _showEditMultiplierDialog(0),
+                  onTap: _showPricesInfo,
                   child: Container(
                     width: colWidth,
                     height: 32,
@@ -1989,7 +2176,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                           ),
                         ),
                         Text(
-                          '\$${_aluminumMultiplier.toStringAsFixed(2)}/lb',
+                          '${LocationPrices.fmt(_aluminumMultiplier)}/lb',
                           style: TextStyle(fontSize: 7, color: Colors.blue[700]),
                         ),
                       ],
@@ -2068,7 +2255,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
               Material(
                 color: Colors.blue[50],
                 child: InkWell(
-                  onTap: () => _showEditMultiplierDialog(1),
+                  onTap: _showPricesInfo,
                   child: Container(
                     width: colWidth,
                     height: 32,
@@ -2087,7 +2274,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                           ),
                         ),
                         Text(
-                          '\$${_glassMultiplier.toStringAsFixed(3)}/lb',
+                          '${LocationPrices.fmt(_glassMultiplier)}/lb',
                           style: TextStyle(fontSize: 7, color: Colors.blue[700]),
                         ),
                       ],
@@ -2166,7 +2353,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
               Material(
                 color: Colors.blue[50],
                 child: InkWell(
-                  onTap: () => _showEditMultiplierDialog(2),
+                  onTap: _showPricesInfo,
                   child: Container(
                     width: colWidth,
                     height: 32,
@@ -2185,7 +2372,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
                           ),
                         ),
                         Text(
-                          '\$${_plasticMultiplier.toStringAsFixed(2)}/lb',
+                          '${LocationPrices.fmt(_plasticMultiplier)}/lb',
                           style: TextStyle(fontSize: 7, color: Colors.blue[700]),
                         ),
                       ],
@@ -3127,6 +3314,15 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
           'hasSignatures': signaturePoints.isNotEmpty,
           'signatureCount': signaturePoints.length,
           'customerNames': customerNames, // Add customer names to sheet data
+          // Prices in effect when the sheet was submitted (audit trail).
+          'prices': {
+            'aluminum': _aluminumMultiplier,
+            'glass': _glassMultiplier,
+            'pete': _plasticMultiplier,
+            'other': Map<String, double>.from(_otherPrices),
+            'source': _priceSource,
+            if (_pricesLocationId != null) 'locationId': _pricesLocationId,
+          },
         };
 
         _logSubmissionProgress('Processed sheet $sheetNumber');
@@ -3152,89 +3348,6 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     } catch (_) {}
 
     return entryData;
-  }
-
-  // Find existing entry for the same location and date
-  Future<DocumentSnapshot?> _findExistingEntry(
-    String? locationId,
-    DateTime entryDate,
-  ) async {
-    if (locationId == null || locationId.isEmpty) {
-      print('No location ID provided, skipping existing entry check');
-      return null;
-    }
-
-    try {
-      // Normalize date to simple key (YYYY-MM-DD), matching entryDateKey stored in documents
-      final dateKey = DateFormat('yyyy-MM-dd').format(entryDate);
-
-      print('Searching for existing entry: location=$locationId, dateKey=$dateKey');
-
-      // Query for entries with the same location and date key
-      final querySnapshot = await FirebaseFirestore.instance
-          .collection('entries')
-          .where('location', isEqualTo: locationId)
-          .where('entryDateKey', isEqualTo: dateKey)
-          .limit(1)
-          .get();
-
-      if (querySnapshot.docs.isNotEmpty) {
-        print('Found existing entry: ${querySnapshot.docs.first.id}');
-        return querySnapshot.docs.first;
-      } else {
-        print('No existing entry found for location=$locationId, dateKey=$dateKey');
-      }
-    } catch (e) {
-      print('Error finding existing entry: $e');
-      // Don't throw - if we can't find existing entry, just create a new one
-    }
-
-    return null;
-  }
-
-  // Get the next available sheet number for an existing entry
-  int _getNextSheetNumber(Map<String, dynamic> existingSheets) {
-    if (existingSheets.isEmpty) {
-      return 1;
-    }
-
-    // Find the highest sheet number
-    int maxSheetNumber = 0;
-    for (final sheetKey in existingSheets.keys) {
-      final sheetNum = int.tryParse(sheetKey);
-      if (sheetNum != null && sheetNum > maxSheetNumber) {
-        maxSheetNumber = sheetNum;
-      }
-    }
-
-    return maxSheetNumber + 1;
-  }
-
-  // Simple save method that just saves basic info
-  Future<void> _saveBasicEntry(String userId, String userName) async {
-    try {
-      print('=== SAVING BASIC ENTRY ===');
-
-      final entryRef = FirebaseFirestore.instance.collection('entries').doc();
-
-      final basicEntry = {
-        'userId': userId,
-        'userRef': FirebaseFirestore.instance.collection('users').doc(userId),
-        'userName': userName,
-        'createdAt': DateTime.now().toIso8601String(),
-        'entryType': 'basic',
-        'hasGridData': false,
-        'sheetCount': _sheetsGridData.length,
-        'approved': false,
-      };
-
-      print('Basic entry data: $basicEntry');
-      await entryRef.set(basicEntry);
-      print('Basic entry saved successfully');
-    } catch (e) {
-      print('Basic entry save failed: $e');
-      throw e;
-    }
   }
 
   // Helper method to validate total data size
@@ -3279,131 +3392,6 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     } catch (e) {
       print('Error validating data size: $e');
       return false;
-    }
-  }
-
-  // Test method to create minimal valid data
-  Future<Map<String, dynamic>> _createTestData(
-    String userId,
-    String email,
-  ) async {
-    return {
-      'userId': userId,
-      'email': email,
-      'createdAt': DateTime.now().toIso8601String(),
-      'entryDate': _selectedDate.toIso8601String(),
-      'entryDateKey': DateFormat('yyyy-MM-dd').format(_selectedDate),
-      'sheets': {
-        '1': {
-          'data': {
-            'rows': 15,
-            'columns': 21,
-            'values': List.generate(15 * 21, (index) => ''),
-          },
-          'signatures': {},
-        },
-      },
-    };
-  }
-
-  // Basic Firestore connectivity test
-  Future<void> _testFirestoreConnection() async {
-    try {
-      print('=== TESTING FIRESTORE CONNECTION ===');
-
-      final testRef = FirebaseFirestore.instance.collection('test').doc();
-      final testData = {
-        'test': true,
-        'timestamp': DateTime.now().toIso8601String(),
-        'message': 'Connection test',
-      };
-
-      print('Test data: $testData');
-      await testRef.set(testData);
-      print('Firestore connection test successful');
-
-      // Clean up test document
-      await testRef.delete();
-      print('Test document cleaned up');
-    } catch (e) {
-      print('Firestore connection test failed: $e');
-      throw Exception('Firestore connection failed: $e');
-    }
-  }
-
-  // Minimal test to isolate Firestore issue
-  Future<void> _testMinimalFirestore() async {
-    try {
-      print('=== MINIMAL FIRESTORE TEST ===');
-
-      // Test 1: Basic document creation
-      final testRef = FirebaseFirestore.instance.collection('test').doc();
-      final minimalData = {'test': 'minimal', 'timestamp': '2024-01-01'};
-
-      print('Test 1: Creating minimal document...');
-      await testRef.set(minimalData);
-      print('Test 1: Success');
-
-      // Test 2: Document with array
-      final testRef2 = FirebaseFirestore.instance.collection('test').doc();
-      final arrayData = {
-        'test': 'array',
-        'data': ['a', 'b', 'c'],
-      };
-
-      print('Test 2: Creating document with array...');
-      await testRef2.set(arrayData);
-      print('Test 2: Success');
-
-      // Test 3: Document with nested structure (similar to your data)
-      final testRef3 = FirebaseFirestore.instance.collection('test').doc();
-      final nestedData = {
-        'userId': 'test-user',
-        'userName': 'Test User',
-        'createdAt': '2024-01-01',
-        'sheets': {
-          '1': {
-            'data': {
-              'rows': 1,
-              'columns': 21,
-              'values': [
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-                '',
-              ],
-            },
-            'signatures': {},
-          },
-        },
-      };
-
-      print('Test 3: Creating document with nested structure...');
-      await testRef3.set(nestedData);
-      print('Test 3: Success');
-
-      // Clean up
-      await testRef.delete();
-      await testRef2.delete();
-      await testRef3.delete();
-      print('All test documents cleaned up');
-    } catch (e) {
-      print('Minimal Firestore test failed: $e');
-      print('Error type: ${e.runtimeType}');
-      throw e;
     }
   }
 
@@ -3516,75 +3504,26 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
     }
   }
 
-  // Helper method to save signature points to subcollection
-  Future<void> _saveSignaturePointsToSubcollection(
-    String entryId,
-    String sheetNumber,
-    Map<String, List<Point>> signaturePoints, {
-    required int sourceSheetNumber, // original (pre-remap) sheet number for grid data lookup
-  }) async {
-    try {
-      print(
-        'Saving signature points to subcollection for entry $entryId, sheet $sheetNumber',
-      );
-
-      final subcollectionRef = FirebaseFirestore.instance
-          .collection('entries')
-          .doc(entryId)
-          .collection('signatures')
-          .doc(sheetNumber);
-
-      // Convert points to serializable format
-      final serializedPoints = <String, List<Map<String, dynamic>>>{};
-      final customerNames = <String, String>{}; // Store customer names
-
-      // Use the ORIGINAL (pre-remap) sheet number to look up the grid data.
-      // sheetNumber is the storage key (may be remapped when merging into an
-      // existing entry), whereas sourceSheetNumber is always the local key that
-      // correctly addresses _sheetsGridData.
-      final sheetGridData =
-          _sheetsGridData[sourceSheetNumber] ?? _currentGridData;
-
-      signaturePoints.forEach((key, points) {
-        serializedPoints[key] =
-            points.map((point) {
-              // Serialize each point into a map of its properties
-              return {
-                'dx': point.offset.dx,
-                'dy': point.offset.dy,
-                'type': point.type.index, // 0 for move, 1 for draw
-              };
-            }).toList();
-
-        // Extract customer name from the correct sheet's grid data
-        final rowCol = key.split('-');
-        if (rowCol.length == 2) {
-          final row = int.tryParse(rowCol[0]);
-          final col = int.tryParse(rowCol[1]);
-          if (row != null &&
-              col != null &&
-              row < sheetGridData.length &&
-              col < sheetGridData[row].length) {
-            final cellData = sheetGridData[row][col];
-            if (cellData.contains('/') && cellData.contains('Signed')) {
-              final parts = cellData.split('/');
-              customerNames[key] = parts[0]; // Store the customer name
-            }
-          }
-        }
-      });
-
-      await subcollectionRef.set({
-        'points': serializedPoints,
-        'customerNames': customerNames, // Add customer names to storage
-        'createdAt': DateTime.now().toIso8601String(),
-      });
-
-      print('Signature points and customer names saved successfully');
-    } catch (e) {
-      print('Error saving signature points: $e');
-      throw e;
-    }
+  /// Signature document for one sheet (`entries/{id}/signatures/{sheet}`):
+  /// stroke points per signed cell plus the customer names, taken from that
+  /// sheet's own grid.
+  Map<String, dynamic> _signaturePayload(int sheetNumber, Map<String, List<Point>> signaturePoints) {
+    final grid = _sheetsGridData[sheetNumber] ?? const <List<String>>[];
+    final points = <String, List<Map<String, dynamic>>>{};
+    final names = <String, String>{};
+    signaturePoints.forEach((key, pts) {
+      points[key] = [
+        for (final p in pts) {'dx': p.offset.dx, 'dy': p.offset.dy, 'type': p.type.index},
+      ];
+      final rc = key.split('-');
+      final row = rc.length == 2 ? int.tryParse(rc[0]) : null;
+      final col = rc.length == 2 ? int.tryParse(rc[1]) : null;
+      if (row != null && col != null && row < grid.length && col < grid[row].length) {
+        final cell = grid[row][col];
+        if (cell.contains('/') && cell.contains('Signed')) names[key] = cell.split('/').first;
+      }
+    });
+    return {'points': points, 'customerNames': names};
   }
 
   // Helper method to reconstruct signature from points
@@ -3673,42 +3612,17 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
             );
           }
 
-          _logSubmissionProgress(
-            'Testing Firestore connection...',
-          );
-
-          // Test Firestore connection first
-          await _testFirestoreConnection();
-
-          _logSubmissionProgress(
-            'Running minimal Firestore tests...',
-          );
-
-          // Run minimal tests to isolate the issue
-          await _testMinimalFirestore();
-
-          _logSubmissionProgress(
-            'Preparing Firestore data',
-          );
-
-          // For debugging: try with test data first
-          Map<String, dynamic> entryData;
+          // Prepare the entry exactly as it will be stored. (No test writes,
+          // and never a placeholder sheet if this fails: the draft stays.)
+          final Map<String, dynamic> entryData;
           try {
-            entryData = await _prepareEntryData(
-              user.uid,
-              user.email!,
-            );
+            entryData = await _prepareEntryData(user.uid, user.email!);
           } catch (e) {
-            print('Error preparing entry data: $e');
-            // Fallback to test data
-            print('Falling back to test data');
-            entryData = await _createTestData(
-              user.uid,
-              user.email!,
-            );
+            throw Exception('Could not prepare the sheet: $e');
           }
-
-          // Validate data size before attempting to save
+          if ((entryData['sheets'] as Map).isEmpty) {
+            throw Exception('Nothing to submit on this sheet.');
+          }
           if (!_validateDataSize(entryData)) {
             setState(() {
               _isSubmitting = false;
@@ -3716,117 +3630,46 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
             return;
           }
 
-          // Check if an entry exists for the same location and date
-          final locationId = entryData['location'] as String?;
-          final existingEntryDoc = await _findExistingEntry(
-            locationId,
-            _selectedDate,
+          // 1) Keep it on this tablet first, so nothing is lost if the upload
+          //    can't finish (offline, app closed, error).
+          final entry = Map<String, dynamic>.from(entryData)
+            ..remove('userRef')
+            ..remove('locationRef');
+          final signatures = <String, dynamic>{
+            for (final e in _sheetsSignaturePoints.entries)
+              // Only sheets that made it into the entry.
+              if (e.value.isNotEmpty && (entry['sheets'] as Map).containsKey('${e.key}'))
+                '${e.key}': _signaturePayload(e.key, e.value),
+          };
+          final item = await SheetOutbox.instance.add(
+            entry: entry,
+            signatures: signatures,
+            receiptIds: Map<String, String>.from(_receiptIdsByCell),
           );
+          _submitted = true;
+          _logSubmissionProgress('Saved on this tablet as ${item.localId}');
+          await _clearDraft();
 
-          DocumentReference entryRef;
-          Map<String, dynamic> sheetsToSave = {};
-          Map<int, int> sheetNumberMapping = {}; // Maps old sheet number to new sheet number
-          bool isMergedEntry = false;
-
-          if (existingEntryDoc != null) {
-            isMergedEntry = true;
-            // Entry exists - merge sheets
-            _logSubmissionProgress(
-              'Found existing entry for same location and date. Merging sheets...',
-            );
-        
-            entryRef = existingEntryDoc.reference;
-            final existingData = existingEntryDoc.data() as Map<String, dynamic>?;
-            final existingSheets = existingData?['sheets'] as Map<String, dynamic>? ?? {};
-        
-            // Get the next available sheet number
-            int nextSheetNumber = _getNextSheetNumber(existingSheets);
-        
-            // Remap new sheet numbers to continue from existing sheets
-            for (final entry in _sheetsGridData.entries) {
-              final oldSheetNumber = entry.key;
-              final newSheetNumber = nextSheetNumber++;
-              sheetNumberMapping[oldSheetNumber] = newSheetNumber;
-          
-              // Get the sheet data from entryData
-              final oldSheetKey = oldSheetNumber.toString();
-              if (entryData['sheets'].containsKey(oldSheetKey)) {
-                sheetsToSave[newSheetNumber.toString()] = entryData['sheets'][oldSheetKey];
-              }
-            }
-        
-            // Merge with existing sheets
-            final mergedSheets = Map<String, dynamic>.from(existingSheets);
-            mergedSheets.addAll(sheetsToSave);
-        
-            // Update the existing entry with merged sheets
-            await entryRef.update({
-              'sheets': mergedSheets,
-              'updatedAt': DateTime.now().toIso8601String(),
-            });
-        
-            _logSubmissionProgress(
-              'Merged ${sheetsToSave.length} new sheet(s) into existing entry',
-            );
-          } else {
-            // No existing entry - create new one
-            _logSubmissionProgress(
-              'No existing entry found. Creating new entry...',
-            );
-        
-            entryRef = FirebaseFirestore.instance
-                .collection('entries')
-                .doc();
-            await entryRef.set(entryData);
-        
-            // For new entries, sheet numbers stay the same
-            for (final entry in _sheetsGridData.entries) {
-              sheetNumberMapping[entry.key] = entry.key;
-            }
-            sheetsToSave = Map<String, dynamic>.from(entryData['sheets']);
-          }
-
-          // Save signature points to subcollections with correct sheet numbers
-          for (final entry in _sheetsSignaturePoints.entries) {
-            final oldSheetNumber = entry.key;
-            final newSheetNumber = sheetNumberMapping[oldSheetNumber] ?? oldSheetNumber;
-            final signaturePoints = entry.value;
-
-            if (signaturePoints.isNotEmpty) {
-              try {
-                await _saveSignaturePointsToSubcollection(
-                  entryRef.id,
-                  newSheetNumber.toString(),
-                  signaturePoints,
-                  sourceSheetNumber: oldSheetNumber,
-                );
-                print(
-                  'Saved signature points for sheet $newSheetNumber (was $oldSheetNumber)',
-                );
-              } catch (e) {
-                print(
-                  'Error saving signature points for sheet $newSheetNumber: $e',
-                );
-                // Continue with other sheets even if one fails
-              }
-            }
-          }
-
-          _logSubmissionProgress(
-            'Successfully saved to Firestore',
-          );
-
+          // 2) Upload now. If it can't finish it stays "waiting" and is
+          //    retried from Sync on the home screen (and automatically).
+          // Don't keep staff waiting long: after 25 s it carries on in the
+          // background and the sheet shows as waiting until it's up.
+          final uploaded = await SheetOutbox.instance
+              .upload(item.localId)
+              .timeout(const Duration(seconds: 25), onTimeout: () => false);
+          _logSubmissionProgress(uploaded ? 'Uploaded' : 'Saved, upload waiting');
           if (!mounted) return;
 
-          // Show success message
-          final message = isMergedEntry
-              ? 'Sheets merged into existing entry successfully'
-              : 'Entry submitted successfully';
-      
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(message),
-              backgroundColor: Colors.green,
+              content: Text(
+                uploaded
+                    ? 'Entry submitted'
+                    : 'Saved on this tablet. It will upload when the connection is back '
+                        '(Sync on the home screen).',
+              ),
+              backgroundColor: uploaded ? Colors.green : Colors.orange,
+              duration: Duration(seconds: uploaded ? 2 : 6),
             ),
           );
 
@@ -3835,21 +3678,9 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
             const Duration(milliseconds: 500),
           );
 
-          // Attach the submitted entry to receipts issued while filling the sheet.
-          try {
-            await ReceiptService.linkToEntry(
-              receiptIdsByCell: _receiptIdsByCell,
-              entryId: entryRef.id,
-              sheetNumberMapping: sheetNumberMapping,
-            );
-          } catch (e) {
-            print('Error linking receipts to entry: $e');
-          }
-
           if (mounted) {
-            await _clearDraft();
-            final role = await ref.read(currentUserRoleProvider.future);
-            if (!mounted) return;
+            // Read synchronously: offline, waiting on the role must not hang.
+            final role = ref.read(currentUserRoleProvider).valueOrNull;
             context.go(role == 'admin' ? '/admin' : '/home');
           }
         } catch (e) {
@@ -3881,6 +3712,7 @@ class _NewEntryScreenState extends ConsumerState<NewEntryScreen>
 
   @override
   Widget build(BuildContext context) {
+    _syncLocationPrices();
     if (_isPhone) return _buildPhone(context);
     return PopScope<Object?>(
       canPop: false,

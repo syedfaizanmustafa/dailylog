@@ -106,23 +106,22 @@ class _LoginScreenState extends ConsumerState<LoginScreen>
 
   Widget _compactBrandPanel() {
     return Container(
-      color: AppColors.navy,
+      // Same forest green as the launch splash.
+      color: AppColors.forest,
       child: Stack(
         clipBehavior: Clip.hardEdge,
         children: [
-          const Positioned.fill(
-            child: RuledLines(color: Color(0x12FFFFFF), spacing: 18, thickness: 2),
-          ),
           Positioned(
             right: -120,
             top: -90,
             child: Opacity(
-              opacity: 0.22,
-              child: const SpinningBrandMark(
+              opacity: 0.14,
+              // Draws itself once, like the launch splash.
+              child: const DrawnBrandMark(
                 size: 340,
-                arc: Colors.white,
-                head: Colors.white,
-                period: Duration(seconds: 50),
+                arrows: Colors.white,
+                strips: Colors.white,
+                duration: Duration(milliseconds: 1600),
               ),
             ),
           ),
@@ -162,23 +161,22 @@ class _LoginScreenState extends ConsumerState<LoginScreen>
 
   Widget _brandPanel() {
     return Container(
-      color: AppColors.navy,
+      // Same forest green as the launch splash.
+      color: AppColors.forest,
       child: Stack(
         clipBehavior: Clip.hardEdge,
         children: [
-          const Positioned.fill(
-            child: RuledLines(color: Color(0x12FFFFFF), spacing: 18, thickness: 2),
-          ),
           Positioned(
             right: -200,
             bottom: -170,
             child: Opacity(
-              opacity: 0.22,
-              child: const SpinningBrandMark(
+              opacity: 0.14,
+              // Draws itself once, like the launch splash.
+              child: const DrawnBrandMark(
                 size: 560,
-                arc: Colors.white,
-                head: Colors.white,
-                period: Duration(seconds: 50),
+                arrows: Colors.white,
+                strips: Colors.white,
+                duration: Duration(milliseconds: 1600),
               ),
             ),
           ),
@@ -215,8 +213,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen>
                         Text(
                           'RECYCLING',
                           style: TextStyle(
-                            color: AppColors.sage,
+                            color: AppColors.sageLight,
                             fontSize: 13,
+                            fontWeight: FontWeight.w600,
                             letterSpacing: 3,
                           ),
                         ),
@@ -240,7 +239,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen>
                   child: Text(
                     'Log every customer, capture their signature, and hand them a receipt — on paper, by text or by QR.',
                     style: TextStyle(
-                      color: Color(0xFFD5DAE2),
+                      color: Color(0xFFDCE8D2),
                       fontSize: 17,
                       height: 1.6,
                     ),
@@ -249,7 +248,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen>
                 const Spacer(),
                 const Text(
                   'CA CRV certified recycling',
-                  style: TextStyle(color: Color(0xFFA9B2C2), fontSize: 13),
+                  style: TextStyle(color: Color(0xB3FAF8F1), fontSize: 13),
                 ),
               ],
             ),

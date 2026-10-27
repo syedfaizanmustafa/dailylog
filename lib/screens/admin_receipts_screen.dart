@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,8 +8,10 @@ import 'package:printing/printing.dart';
 import '../config/brand.dart';
 import '../controllers/app_controller.dart';
 import '../models/receipt.dart';
+import '../services/data_sync.dart';
 import '../services/receipt_service.dart';
 import '../widgets/admin_shell.dart';
+import '../widgets/shimmer.dart';
 
 /// Admin › Receipts: every issued customer receipt (all time by default,
 /// newest first, 100 at a time) with its text-message status, filtered by
@@ -41,7 +41,9 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
   bool _loading = true;
   bool _loadingMore = false;
   bool _hasMore = false;
-  DocumentSnapshot<Map<String, dynamic>>? _lastDoc;
+
+  /// All receipts, newest first, for local paging in the all-time view.
+  List<ReceiptData> _pageSource = const [];
   String? _error;
 
   /// Bumped on every fresh load so a slow "load more" from an older query
@@ -51,7 +53,18 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
+    // Already synced this session: the tab appears at once (shimmer for a
+    // frame), then the list is built from memory and refreshed quietly.
+    final docs = SyncedCollection.receipts.peek;
+    if (docs != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() => _apply(docs));
+        _load(silent: true);
+      });
+    } else {
+      _load();
+    }
   }
 
   @override
@@ -68,65 +81,81 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
     super.dispose();
   }
 
-  Future<void> _load() async {
+  /// Receipts come from the on-device cache plus only what changed since
+  /// the last sync (services/data_sync.dart); filtering and paging happen
+  /// here. [silent]: refresh in the background, keeping the list on screen.
+  Future<void> _load({bool silent = false}) async {
     final gen = ++_loadGen;
-    setState(() {
-      _loadingMore = false;
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final col = FirebaseFirestore.instance.collection('receipts');
-      QuerySnapshot<Map<String, dynamic>> snap;
-      var paged = false;
-      if (_days == 0 && _locationIds.isNotEmpty) {
-        // Chosen locations, all time: whereIn in chunks of 30 (no composite
-        // index needed); merged and sorted below.
-        final ids = _locationIds.toList();
-        final docs = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-        for (var i = 0; i < ids.length; i += 30) {
-          final part = await col
-              .where('locationId', whereIn: ids.sublist(i, min(i + 30, ids.length)))
-              .get();
-          docs.addAll(part.docs);
-        }
-        final rows = docs.map(ReceiptData.fromFirestore).toList()..sort(_newestFirst);
-        if (!mounted || gen != _loadGen) return;
-        setState(() {
-          _rows = rows;
-          _lastDoc = null;
-          _hasMore = false;
-          _loading = false;
-        });
-        return;
-      } else if (_days == 0) {
-        snap = await col.orderBy('receiptNumber', descending: true).limit(_pageSize).get();
-        paged = true;
-      } else {
-        final fmt = DateFormat('yyyy-MM-dd');
-        final now = DateTime.now();
-        final today = DateTime(now.year, now.month, now.day);
-        final start = today.subtract(Duration(days: _days - 1));
-        snap = await col
-            .where('entryDateKey', isGreaterThanOrEqualTo: fmt.format(start))
-            .where('entryDateKey', isLessThanOrEqualTo: fmt.format(today))
-            .get();
-      }
-      final rows = snap.docs.map(ReceiptData.fromFirestore).toList()..sort(_newestFirst);
-      if (!mounted || gen != _loadGen) return;
+    if (!silent) {
       setState(() {
-        _rows = rows;
-        _lastDoc = snap.docs.isEmpty ? null : snap.docs.last;
-        _hasMore = paged && snap.docs.length == _pageSize;
-        _loading = false;
+        _loadingMore = false;
+        _loading = true;
+        _error = null;
       });
+    }
+    try {
+      final docs = await SyncedCollection.receipts.load();
+      if (!mounted || gen != _loadGen) return;
+      // Background refresh and nothing changed: keep the list as it is.
+      if (silent && identical(docs, _appliedDocs)) return;
+      setState(() => _apply(docs, keepPages: silent));
     } catch (e) {
       if (!mounted || gen != _loadGen) return;
       setState(() {
-        _error = friendlyError(e);
+        // Background refresh failed: keep the list; show the error only if
+        // there's nothing to show.
+        if (!silent || _rows.isEmpty) _error = friendlyError(e);
         _loading = false;
       });
     }
+  }
+
+  /// Builds the list from synced receipts (call inside setState).
+  /// The synced list the screen was last built from.
+  List<QueryDocumentSnapshot<Map<String, dynamic>>>? _appliedDocs;
+
+  /// One parsed receipt per document, reused across rebuilds/filters.
+  static final Expando<ReceiptData> _parsed = Expando('receiptRow');
+
+  static ReceiptData _row(QueryDocumentSnapshot<Map<String, dynamic>> d) =>
+      _parsed[d] ??= ReceiptData.fromData(d.id, syncedData(d), includeSignature: false);
+
+  void _apply(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs, {bool keepPages = false}) {
+    _appliedDocs = docs;
+    Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> picked = docs;
+    var paged = false;
+    if (_days == 0 && _locationIds.isNotEmpty) {
+      picked = docs.where((d) => _locationIds.contains(syncedData(d)['locationId']?.toString()));
+    } else if (_days == 0) {
+      paged = true;
+    } else {
+      final fmt = DateFormat('yyyy-MM-dd');
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final from = fmt.format(today.subtract(Duration(days: _days - 1)));
+      final to = fmt.format(today);
+      picked = docs.where((d) {
+        final k = syncedData(d)['entryDateKey']?.toString() ?? '';
+        return k.isNotEmpty && k.compareTo(from) >= 0 && k.compareTo(to) <= 0;
+      });
+    }
+    final rows = picked.map(_row).toList()..sort(_newestFirst);
+    final shown = keepPages && paged && _rows.length > _pageSize ? _rows.length : _pageSize;
+    _pageSource = paged ? rows : const [];
+    _rows = paged ? rows.take(shown).toList() : rows;
+    _hasMore = paged && rows.length > _rows.length;
+    _loading = false;
+    _error = null;
+  }
+
+  /// Filters changed: rebuild from what's in memory (instant), else load.
+  void _reapply() {
+    final docs = SyncedCollection.receipts.peek;
+    if (docs == null) {
+      _load();
+      return;
+    }
+    setState(() => _apply(docs));
   }
 
   static int _newestFirst(ReceiptData a, ReceiptData b) {
@@ -136,40 +165,20 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
   }
 
   Future<void> _loadMore() async {
-    final last = _lastDoc;
-    if (last == null || _loadingMore) return;
-    final gen = _loadGen;
-    setState(() => _loadingMore = true);
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection('receipts')
-          .orderBy('receiptNumber', descending: true)
-          .startAfterDocument(last)
-          .limit(_pageSize)
-          .get();
-      if (!mounted || gen != _loadGen) return;
-      setState(() {
-        final seen = _rows.map((r) => r.id).toSet();
-        _rows = [
-          ..._rows,
-          ...snap.docs.map(ReceiptData.fromFirestore).where((r) => !seen.contains(r.id)),
-        ]..sort(_newestFirst);
-        if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
-        _hasMore = snap.docs.length == _pageSize;
-        _loadingMore = false;
-      });
-    } catch (e) {
-      if (!mounted || gen != _loadGen) return;
-      setState(() => _loadingMore = false);
-      showAppSnack(context, friendlyError(e), error: true);
-    }
+    if (_loadingMore || !_hasMore) return;
+    setState(() {
+      _rows = [..._rows, ..._pageSource.skip(_rows.length).take(_pageSize)];
+      _hasMore = _rows.length < _pageSource.length;
+    });
   }
 
   // ── Row actions ─────────────────────────────────────────────────────────
 
   Future<void> _open(ReceiptData r) async {
     await context.push('/receipt', extra: {'receiptId': r.id});
-    _load();
+    // Back on the list: it stays as it was; pick up changes quietly.
+    SyncedCollection.receipts.touch();
+    _load(silent: true);
   }
 
   void _viewSheet(ReceiptData r) {
@@ -253,8 +262,7 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
   void _applyLocations(Set<String> ids) {
     if (ids.length == _locationIds.length && ids.containsAll(_locationIds)) return;
     setState(() => _locationIds = ids);
-    // All time is loaded per location from the server; date ranges filter here.
-    if (_days == 0) _load();
+    _reapply();
   }
 
   Future<void> _openLocationSheet(List<AppLocation> locations, Map<String, Color> colors) async {
@@ -292,6 +300,16 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // "Refresh all data" / signature move finished: reload.
+    ref.listen<int>(syncTickProvider, (_, __) => _load(silent: true));
+    // Shown again from the tab bar: refresh quietly in the background.
+    ref.listen<(String, int)>(adminTabShownProvider, (_, next) {
+      final u = Uri.parse(next.$1);
+      if (u.path != '/admin/receipts') return;
+      final f = u.queryParameters['filter'];
+      if (f != null && f != _filter) setState(() => _filter = f); // e.g. "failed" card
+      _load(silent: true);
+    });
     final colors = ref.watch(locationColorsProvider);
     final locations = ref.watch(adminLocationsProvider).valueOrNull ?? const <AppLocation>[];
     final width = MediaQuery.sizeOf(context).width;
@@ -322,12 +340,15 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
           value: _days,
           onChanged: (d) {
             setState(() => _days = d);
-            _load();
+            _reapply();
           },
         ),
         IconButton(
           tooltip: 'Refresh',
-          onPressed: _load,
+          onPressed: () {
+            SyncedCollection.receipts.touch();
+            _load(silent: true);
+          },
           icon: const Icon(Icons.refresh_rounded, color: AppColors.navy),
         ),
       ],
@@ -393,13 +414,7 @@ class _AdminReceiptsScreenState extends ConsumerState<AdminReceiptsScreen> {
     double hPad,
   ) {
     if (_loading) {
-      return const Center(
-        child: SizedBox(
-          width: 28,
-          height: 28,
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.forest),
-        ),
-      );
+      return SkeletonList(padding: EdgeInsets.symmetric(horizontal: hPad, vertical: 12));
     }
     if (_error != null) {
       return Center(

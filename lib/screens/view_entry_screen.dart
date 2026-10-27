@@ -20,11 +20,14 @@ import '../utils/log_sheet_cell_label.dart';
 import '../utils/sheet_cell_numeric.dart';
 import '../widgets/dual_numeric_cell_editor.dart';
 import '../widgets/single_numeric_cell_editor.dart';
+import '../models/location_prices.dart';
 import '../models/receipt.dart';
 import '../services/receipt_service.dart';
 import 'receipt_screen.dart';
 import '../config/brand.dart';
 import '../controllers/auth_controller.dart';
+import '../services/data_sync.dart';
+import '../widgets/shimmer.dart';
 
 part 'view_entry_phone.dart';
 
@@ -535,6 +538,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
           .update({
         'approved': true,
         'approvedAt': DateTime.now().toIso8601String(),
+        kSyncedAt: syncedNow(),
       });
       
       setState(() {
@@ -1738,7 +1742,12 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
           }
         }
 
+        // Keep everything else stored on the sheet (customer names, the
+        // prices it was entered with, …); only the grid and counts change.
+        final original = (_entryData?['sheets'] as Map?)?[sheetNumber.toString()];
+        final names = _sheetsCustomerNames[sheetNumber];
         updatedSheets[sheetNumber.toString()] = {
+          if (original is Map) ...Map<String, dynamic>.from(original),
           'data': {
             'rows': sheetGridData.length,
             'columns': sheetGridData[0].length,
@@ -1747,6 +1756,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
           'hasSignatures':
               _sheetsSignaturePoints[sheetNumber]?.isNotEmpty ?? false,
           'signatureCount': _sheetsSignaturePoints[sheetNumber]?.length ?? 0,
+          if (names != null && names.isNotEmpty) 'customerNames': names,
         };
       }
 
@@ -1756,8 +1766,10 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
           .update({
             'sheets': updatedSheets,
             'updatedAt': DateTime.now().toIso8601String(),
+            kSyncedAt: syncedNow(),
           });
       _lastSaveOk = true;
+      _entryData?['sheets'] = updatedSheets;
 
       // Save signature points to subcollections if any exist
       for (final entry in _sheetsSignaturePoints.entries) {
@@ -1925,7 +1937,7 @@ class _ViewEntryScreenState extends ConsumerState<ViewEntryScreen> {
           backgroundColor: Colors.transparent,
           elevation: 0,
         ),
-        body: const Center(child: CircularProgressIndicator()),
+        body: const SkeletonList(count: 7),
       );
     }
 

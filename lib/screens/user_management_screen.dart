@@ -8,6 +8,7 @@ import 'package:intl/intl.dart';
 import '../config/brand.dart';
 import '../widgets/admin_shell.dart';
 import '../widgets/floating_confirmation_sheet.dart';
+import '../widgets/shimmer.dart';
 
 /// Latest sheet per staff member → "last active" + where they work.
 class _Activity {
@@ -188,9 +189,7 @@ class _UserManagementScreenState extends ConsumerState<UserManagementScreen> {
         ),
       ],
       child: usersAsync.when(
-        loading: () => const Center(
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.forest),
-        ),
+        loading: () => const SkeletonList(),
         error: (e, _) => Center(child: Text(friendlyError(e))),
         data: (_) => ListView(
           padding: EdgeInsets.fromLTRB(hPad, 0, hPad, 40),

@@ -19,6 +19,7 @@ import '../screens/locations_screen.dart';
 import '../screens/receipt_screen.dart';
 import '../screens/admin_receipts_screen.dart';
 import '../screens/admin_customers_screen.dart';
+import '../screens/tablet_sheets_screen.dart';
 import '../models/receipt.dart';
 
 /// Fade-through: the new page fades in while rising 16 px. Used for the
@@ -155,6 +156,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         pageBuilder: (context, state) => _slidePage(state, const CustomerScreen()),
       ),
       GoRoute(
+        path: '/tablet-sheets',
+        pageBuilder: (context, state) => _fadePage(state, const TabletSheetsScreen()),
+      ),
+      GoRoute(
         path: '/submitted',
         pageBuilder: (context, state) => _fadePage(state, const SubmittedScreen()),
       ),
@@ -184,40 +189,53 @@ final routerProvider = Provider<GoRouter>((ref) {
           );
         },
       ),
-      GoRoute(
-        path: '/admin',
-        pageBuilder: (context, state) => _fadePage(state, const AdminScreen()),
-      ),
-      GoRoute(
-        path: '/admin/users',
-        pageBuilder:
-            (context, state) => _fadePage(state, const UserManagementScreen()),
-      ),
-      GoRoute(
-        path: '/admin/logs',
-        pageBuilder: (context, state) => _fadePage(
-          state,
-          LogSheetsScreen(
-            initialFilter: state.uri.queryParameters['filter'] ?? 'all',
-          ),
-        ),
-      ),
-      GoRoute(
-        path: '/admin/receipts',
-        pageBuilder: (context, state) => _fadePage(
-          state,
-          AdminReceiptsScreen(
-            initialFilter: state.uri.queryParameters['filter'] ?? 'all',
-          ),
-        ),
-      ),
-      GoRoute(
-        path: '/admin/customers',
-        pageBuilder: (context, state) => _fadePage(state, const AdminCustomersScreen()),
-      ),
-      GoRoute(
-        path: '/admin/locations',
-        pageBuilder: (context, state) => _fadePage(state, const LocationsScreen()),
+      // Admin tabs live side by side (IndexedStack): switching is instant and
+      // each tab keeps its data and scroll position. Pages pushed on top
+      // (a receipt, a sheet) come back to the tab exactly as it was.
+      StatefulShellRoute.indexedStack(
+        pageBuilder: (context, state, navigationShell) => _fadePage(state, navigationShell),
+        branches: [
+          StatefulShellBranch(routes: [
+            GoRoute(
+              path: '/admin',
+              builder: (context, state) => const AdminScreen(),
+            ),
+          ]),
+          StatefulShellBranch(routes: [
+            GoRoute(
+              path: '/admin/logs',
+              builder: (context, state) => LogSheetsScreen(
+                initialFilter: state.uri.queryParameters['filter'] ?? 'all',
+              ),
+            ),
+          ]),
+          StatefulShellBranch(routes: [
+            GoRoute(
+              path: '/admin/receipts',
+              builder: (context, state) => AdminReceiptsScreen(
+                initialFilter: state.uri.queryParameters['filter'] ?? 'all',
+              ),
+            ),
+          ]),
+          StatefulShellBranch(routes: [
+            GoRoute(
+              path: '/admin/customers',
+              builder: (context, state) => const AdminCustomersScreen(),
+            ),
+          ]),
+          StatefulShellBranch(routes: [
+            GoRoute(
+              path: '/admin/locations',
+              builder: (context, state) => const LocationsScreen(),
+            ),
+          ]),
+          StatefulShellBranch(routes: [
+            GoRoute(
+              path: '/admin/users',
+              builder: (context, state) => const UserManagementScreen(),
+            ),
+          ]),
+        ],
       ),
     ],
   );

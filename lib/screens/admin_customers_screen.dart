@@ -11,6 +11,8 @@ import '../config/brand.dart';
 import '../controllers/app_controller.dart';
 import '../utils/sheet_cell_numeric.dart';
 import '../widgets/admin_shell.dart';
+import '../services/data_sync.dart';
+import '../widgets/shimmer.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data
@@ -103,13 +105,14 @@ DateTime _parseDate(dynamic v) {
 
 /// Every submitted entry + every receipt, turned into customer profiles.
 final customerDataProvider = FutureProvider.autoDispose<CustomerData>((ref) async {
-  final db = FirebaseFirestore.instance;
+  ref.watch(syncTickProvider);
+  // From the on-device cache + only what changed since the last visit.
   final results = await Future.wait([
-    db.collection('entries').get(),
-    db.collection('receipts').get(),
+    SyncedCollection.entries.load(),
+    SyncedCollection.receipts.load(),
   ]);
-  final entries = results[0];
-  final receipts = results[1];
+  final entryDocs = results[0];
+  final receiptDocs = results[1];
 
   // ── Customer names per entry: entryId -> sheet -> row -> name ──
   // The grid itself has no name column (it is saved with 21 columns), so
@@ -118,8 +121,8 @@ final customerDataProvider = FutureProvider.autoDispose<CustomerData>((ref) asyn
   // the entry so the next load is cheap), and finally issued receipts.
   final names = <String, Map<String, Map<int, String>>>{};
   final needFetch = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-  for (final doc in entries.docs) {
-    final data = doc.data();
+  for (final doc in entryDocs) {
+    final data = syncedData(doc);
     final perSheet = <String, Map<int, String>>{};
     final sheets = data['sheets'] is Map ? Map<String, dynamic>.from(data['sheets'] as Map) : const <String, dynamic>{};
     var hasSignatures = false;
@@ -170,6 +173,7 @@ final customerDataProvider = FutureProvider.autoDispose<CustomerData>((ref) asyn
             for (final e in perSheet.entries)
               e.key: {for (final r in e.value.entries) '${r.key}': r.value},
           },
+          kSyncedAt: syncedNow(),
         });
       } catch (e) {
         debugPrint('Customers: names for entry ${doc.id} not read: $e');
@@ -178,8 +182,8 @@ final customerDataProvider = FutureProvider.autoDispose<CustomerData>((ref) asyn
   }
 
   // Receipts fill any row still without a name.
-  for (final r in receipts.docs) {
-    final d = r.data();
+  for (final r in receiptDocs) {
+    final d = syncedData(r);
     final entryId = d['entryId']?.toString();
     final n = d['customerName']?.toString().trim() ?? '';
     if (entryId == null || n.isEmpty || !names.containsKey(entryId)) continue;
@@ -196,8 +200,8 @@ final customerDataProvider = FutureProvider.autoDispose<CustomerData>((ref) asyn
   // key -> date of the spelling kept in profile.name
   final nameDate = <String, DateTime>{};
 
-  for (final doc in entries.docs) {
-    final data = doc.data();
+  for (final doc in entryDocs) {
+    final data = syncedData(doc);
     final created = _parseDate(data['createdAt']);
     final date = DateTime.tryParse(data['entryDateKey']?.toString() ?? '') ??
         DateTime(created.year, created.month, created.day);
@@ -291,7 +295,7 @@ final customerDataProvider = FutureProvider.autoDispose<CustomerData>((ref) asyn
   customers.removeWhere((_, c) => c.visits.isEmpty);
 
   // Phone / ID # from receipts (newest wins).
-  final recs = receipts.docs.map((d) => d.data()).toList()
+  final recs = receiptDocs.map(syncedData).toList()
     ..sort((a, b) => (a['receiptNumber'] as num? ?? 0).compareTo(b['receiptNumber'] as num? ?? 0));
   for (final r in recs) {
     final c = customers[_normName(r['customerName']?.toString() ?? '')];
@@ -457,6 +461,14 @@ class _AdminCustomersScreenState extends ConsumerState<AdminCustomersScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Shown again from the tab bar: refresh quietly (the current figures
+    // stay on screen until the new ones are ready).
+    ref.listen<(String, int)>(adminTabShownProvider, (_, next) async {
+      if (Uri.parse(next.$1).path != '/admin/customers') return;
+      // Check for changes in the background; recompute only if any (the tab
+      // switches instantly and keeps its figures otherwise).
+      if (await SyncedCollection.refreshChanged() && mounted) ref.invalidate(customerDataProvider);
+    });
     final async = ref.watch(customerDataProvider);
     final colors = ref.watch(locationColorsProvider);
     final locations = ref.watch(adminLocationsProvider).valueOrNull ?? const <AppLocation>[];
@@ -494,18 +506,15 @@ class _AdminCustomersScreenState extends ConsumerState<AdminCustomersScreen> {
         ),
         IconButton(
           tooltip: 'Refresh',
-          onPressed: () => ref.invalidate(customerDataProvider),
+          onPressed: () {
+            SyncedCollection.touchAll();
+            ref.invalidate(customerDataProvider);
+          },
           icon: const Icon(Icons.refresh_rounded, color: AppColors.navy),
         ),
       ],
       child: async.when(
-        loading: () => const Center(
-          child: SizedBox(
-            width: 28,
-            height: 28,
-            child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.forest),
-          ),
-        ),
+        loading: () => const SkeletonDashboard(),
         error: (e, _) => Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -537,7 +546,10 @@ class _AdminCustomersScreenState extends ConsumerState<AdminCustomersScreen> {
       );
     }
     return RefreshIndicator(
-      onRefresh: () async => ref.invalidate(customerDataProvider),
+      onRefresh: () async {
+        SyncedCollection.touchAll();
+        ref.invalidate(customerDataProvider);
+      },
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.fromLTRB(hPad, 4, hPad, 40),

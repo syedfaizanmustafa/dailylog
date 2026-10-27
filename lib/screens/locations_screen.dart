@@ -7,8 +7,11 @@ import 'package:intl/intl.dart';
 
 import '../config/brand.dart';
 import '../controllers/app_controller.dart';
+import '../models/location_prices.dart';
 import '../widgets/admin_shell.dart';
 import '../widgets/floating_confirmation_sheet.dart';
+import '../widgets/location_price_editor.dart';
+import '../widgets/shimmer.dart';
 
 /// Sheets per location over the last 7 days (shown on each card).
 final _locationWeekProvider = FutureProvider<Map<String, int>>((ref) async {
@@ -88,6 +91,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
     final colors = ref.watch(locationColorsProvider);
     final week = ref.watch(_locationWeekProvider).valueOrNull ?? const <String, int>{};
     final numbers = ref.watch(locationNumbersProvider).valueOrNull ?? const <String, int>{};
+    final prices = ref.watch(allLocationPricesProvider).valueOrNull ?? const {};
     final width = MediaQuery.sizeOf(context).width;
     final narrow = width < 760;
     final hPad = narrow ? 16.0 : 28.0;
@@ -109,9 +113,7 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
         ),
       ],
       child: async.when(
-        loading: () => const Center(
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.forest),
-        ),
+        loading: () => const SkeletonList(count: 4, itemHeight: 150),
         error: (e, _) => Center(child: Text(friendlyError(e))),
         data: (locations) {
           if (locations.isEmpty) {
@@ -158,6 +160,19 @@ class _LocationsScreenState extends ConsumerState<LocationsScreen> {
                               color: colorForLocation(colors, locations[i].id),
                               sheetsThisWeek: week[locations[i].id] ?? 0,
                               number: numbers[locations[i].id],
+                              prices: prices[locations[i].id]?.$1,
+                              pricesLoaded: prices.isNotEmpty,
+                              onEditPrices: () => showLocationPriceEditor(
+                                context: context,
+                                location: locations[i],
+                                current: prices[locations[i].id]?.$1,
+                                history: prices[locations[i].id]?.$2 ?? const [],
+                                otherLocations: {
+                                  for (final l in locations)
+                                    if (l.id != locations[i].id && prices[l.id]?.$1 != null)
+                                      l.id: (l.name, prices[l.id]!.$1!),
+                                },
+                              ),
                               onEdit: () => _edit(locations[i]),
                               onDelete: () => _delete(locations[i]),
                             ),
@@ -185,6 +200,9 @@ class _LocationCard extends StatelessWidget {
   final Color color;
   final int sheetsThisWeek;
   final int? number;
+  final LocationPrices? prices;
+  final bool pricesLoaded;
+  final VoidCallback onEditPrices;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -193,6 +211,9 @@ class _LocationCard extends StatelessWidget {
     required this.color,
     required this.sheetsThisWeek,
     this.number,
+    this.prices,
+    this.pricesLoaded = false,
+    required this.onEditPrices,
     required this.onEdit,
     required this.onDelete,
   });
@@ -217,8 +238,9 @@ class _LocationCard extends StatelessWidget {
                   Positioned(
                     right: -30,
                     top: -40,
+                    // Faint watermark so the header's icons and text stay clear.
                     child: Opacity(
-                      opacity: 0.35,
+                      opacity: 0.12,
                       child: BrandMark(size: 140, arc: color, head: color),
                     ),
                   ),
@@ -299,6 +321,8 @@ class _LocationCard extends StatelessWidget {
                       ),
                     ],
                   ),
+                  const SizedBox(height: 12),
+                  _PricesStrip(prices: prices, loaded: pricesLoaded, onEdit: onEditPrices),
                   if (hasCoords) ...[
                     const SizedBox(height: 10),
                     Row(
@@ -335,6 +359,73 @@ class _LocationCard extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // Add / edit form
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Prices on a location card: the three $/lb prices and an Edit button,
+/// or a red "not set" warning.
+class _PricesStrip extends StatelessWidget {
+  final LocationPrices? prices;
+  final bool loaded;
+  final VoidCallback onEdit;
+  const _PricesStrip({required this.prices, required this.loaded, required this.onEdit});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = prices;
+    final missing = loaded && p == null;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+      decoration: BoxDecoration(
+        color: missing ? AppColors.redTint : AppColors.cream,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.sell_outlined, size: 18, color: missing ? AppColors.redText : AppColors.forest),
+          const SizedBox(width: 8),
+          Expanded(
+            child: p == null
+                ? Text(
+                    missing ? 'Prices not set · sheets use standard prices' : 'Loading prices…',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: missing ? AppColors.redText : AppColors.slate,
+                    ),
+                  )
+                : Wrap(
+                    spacing: 12,
+                    runSpacing: 2,
+                    children: [
+                      for (final (k, label) in const [('aluminum', 'Alum.'), ('glass', 'Glass'), ('pete', 'PETE')])
+                        Text.rich(
+                          TextSpan(children: [
+                            TextSpan(text: '$label ', style: const TextStyle(color: AppColors.slate)),
+                            TextSpan(
+                              text: LocationPrices.fmt(p[k]),
+                              style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.navy),
+                            ),
+                          ]),
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      const Text('per lb', style: TextStyle(fontSize: 12, color: AppColors.slate)),
+                      if (p.other.isNotEmpty)
+                        Text(
+                          '+ ${p.other.length} other ${p.other.length == 1 ? 'code' : 'codes'}',
+                          style: const TextStyle(fontSize: 12, color: AppColors.slate),
+                        ),
+                    ],
+                  ),
+          ),
+          TextButton(
+            onPressed: onEdit,
+            child: Text(p == null ? 'Set prices' : 'Edit prices',
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _LocationForm extends StatefulWidget {
   final AppLocation? location;

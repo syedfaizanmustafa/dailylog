@@ -684,6 +684,9 @@ class _PhoneEntryViewState extends State<_PhoneEntryView> {
         points: editing.points,
         receipt: _receipts[editing.key],
         subtitle: _subtitleDate(),
+        sheetPrices: LocationPrices.fromMap(
+          ((h._entryData?['sheets'] as Map?)?['${editing.sheet}'] as Map?)?['prices'],
+        ),
         onDone: _closeEditor,
       );
     }
@@ -2281,9 +2284,15 @@ class _PhoneRowEditorPage extends StatefulWidget {
   final String subtitle;
   final ValueChanged<_RowEdit?> onDone;
 
+  /// Prices saved with the sheet when it was submitted (null on older
+  /// sheets). Used for SW → paid when the row has no rate of its own, so
+  /// editing an old sheet never picks up today's prices.
+  final LocationPrices? sheetPrices;
+
   const _PhoneRowEditorPage({
     super.key,
     required this.onDone,
+    this.sheetPrices,
     required this.sheet,
     required this.row,
     required this.cells,
@@ -2348,7 +2357,13 @@ class _PhoneRowEditorPageState extends State<_PhoneRowEditorPage> {
     if (!m.autoPaid) return 0.0;
     final sw = _numAt(_cells, m.baseCols.first);
     final paid = _numAt(_cells, m.paidCol);
-    return sw > 0 && paid > 0 ? paid / sw : m.defaultRate;
+    if (sw > 0 && paid > 0) return paid / sw;
+    final saved = widget.sheetPrices;
+    final i = _kMats.indexOf(m);
+    if (saved != null && i >= 0 && i < LocationPrices.mainKeys.length) {
+      return saved[LocationPrices.mainKeys[i]];
+    }
+    return m.defaultRate;
   }
 
   bool get _changed {

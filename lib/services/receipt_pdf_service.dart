@@ -24,7 +24,9 @@ class ReceiptPdfService {
   static const _black = PdfColors.black;
   static const _grey = PdfColors.grey700;
 
-  static Future<Uint8List> build(ReceiptData r) async {
+  /// [signaturePending]: draw a light placeholder where the signature goes
+  /// (on-screen preview while the signature loads; never printed or shared).
+  static Future<Uint8List> build(ReceiptData r, {bool signaturePending = false}) async {
     final doc = pw.Document(
       title: 'Receipt ${r.receiptNumberLabel} - ${ReceiptConfig.businessName}',
       author: ReceiptConfig.businessName,
@@ -48,7 +50,7 @@ class ReceiptPdfService {
               pw.SizedBox(height: 6),
               _table(r, label, value, bold),
               pw.SizedBox(height: 6),
-              _footer(r, sigImage, label, value, small),
+              _footer(r, sigImage, label, value, small, signaturePending: signaturePending),
             ],
           );
         },
@@ -296,8 +298,9 @@ class ReceiptPdfService {
     pw.ImageProvider? sigImage,
     pw.TextStyle label,
     pw.TextStyle value,
-    pw.TextStyle small,
-  ) {
+    pw.TextStyle small, {
+    bool signaturePending = false,
+  }) {
     pw.Widget signLine(String l, pw.Widget child) => pw.Row(
           crossAxisAlignment: pw.CrossAxisAlignment.end,
           children: [
@@ -347,7 +350,20 @@ class ReceiptPdfService {
           pw.SizedBox(
             height: 30,
             child: sigImage == null
-                ? pw.SizedBox()
+                ? (signaturePending
+                    ? pw.Align(
+                        alignment: pw.Alignment.bottomLeft,
+                        child: pw.Container(
+                          width: 150,
+                          height: 22,
+                          margin: const pw.EdgeInsets.only(bottom: 2),
+                          decoration: pw.BoxDecoration(
+                            color: PdfColors.grey200,
+                            borderRadius: pw.BorderRadius.circular(3),
+                          ),
+                        ),
+                      )
+                    : pw.SizedBox())
                 : pw.Align(
                     alignment: pw.Alignment.bottomLeft,
                     child: pw.Image(sigImage, fit: pw.BoxFit.contain),

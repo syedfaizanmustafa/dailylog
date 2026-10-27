@@ -8,6 +8,8 @@ import 'package:intl/intl.dart';
 import '../config/brand.dart';
 import '../controllers/app_controller.dart';
 import '../controllers/auth_controller.dart';
+import '../services/data_sync.dart';
+import '../services/receipt_service.dart';
 import '../utils/entry_stats.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -400,7 +402,7 @@ class AdminShell extends ConsumerWidget {
         selectedIndex: AdminSection.nav.indexOf(section),
         onDestinationSelected: (i) {
           final target = AdminSection.nav[i];
-          if (target != section) context.go(target.route);
+          if (target != section) _showTab(context, ref, target);
         },
         destinations: [
           for (final s in AdminSection.nav)
@@ -540,7 +542,7 @@ class _AdminNav extends ConsumerWidget {
   }
 }
 
-class _NavItem extends StatelessWidget {
+class _NavItem extends ConsumerWidget {
   final AdminSection section;
   final bool selected;
   final bool compact;
@@ -553,7 +555,7 @@ class _NavItem extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final fg = selected ? Colors.white : const Color(0xFFD5DAE2);
     final badgeWidget = badge == null
         ? null
@@ -577,7 +579,7 @@ class _NavItem extends StatelessWidget {
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(10),
-          onTap: selected ? null : () => context.go(section.route),
+          onTap: selected ? null : () => _showTab(context, ref, section),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
             height: 46,
@@ -1738,11 +1740,49 @@ Future<void> showAdminAccountSheet(BuildContext context, WidgetRef ref) {
                           ? null
                           : () {
                               Navigator.of(sheetCtx).pop();
-                              context.go(AdminSection.staff.route);
+                              showAdminTab(context, ref, AdminSection.staff.route);
                             },
                       icon: const Icon(Icons.manage_accounts_rounded),
                       label: const Text('Manage staff', style: TextStyle(fontSize: 16)),
                     ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextButton.icon(
+                          onPressed: signingOut
+                              ? null
+                              : () {
+                                  Navigator.of(sheetCtx).pop();
+                                  _runDataTask(
+                                    context,
+                                    ref,
+                                    title: 'Refreshing all data…',
+                                    done: (_) => 'All data refreshed',
+                                    task: (_) async {
+                                      await SyncedCollection.refreshAll();
+                                      return 0;
+                                    },
+                                  );
+                                },
+                          icon: const Icon(Icons.sync_rounded, size: 20),
+                          label: const Text('Refresh all data'),
+                        ),
+                      ),
+                      Expanded(
+                        child: TextButton.icon(
+                          onPressed: signingOut
+                              ? null
+                              : () {
+                                  Navigator.of(sheetCtx).pop();
+                                  _confirmMoveSignatures(context, ref);
+                                },
+                          icon: const Icon(Icons.bolt_rounded, size: 20),
+                          label: const Text('Speed up receipts'),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 10),
                   SizedBox(
@@ -1792,3 +1832,118 @@ Future<void> showAdminAccountSheet(BuildContext context, WidgetRef ref) {
     },
   );
 }
+
+
+/// One-time move of signatures out of older receipts (see
+/// [ReceiptService.moveOldSignatures]).
+Future<void> _confirmMoveSignatures(BuildContext context, WidgetRef ref) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: const Text('Speed up receipts?'),
+      content: const Text(
+        'Older receipts keep the customer\'s signature inside the receipt itself, which makes '
+        'every list of receipts slow to load. This moves each signature to its own record '
+        '(copied and removed in one step per receipt, nothing is lost). Receipts and PDFs look '
+        'exactly the same.\n\nOnly run it once every iPad and phone has the latest app version '
+        '(older versions read the signature from the receipt itself). Run it once, on Wi-Fi; '
+        'it downloads all receipts one time.',
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Not now')),
+        FilledButton(
+          onPressed: () => Navigator.pop(c, true),
+          style: FilledButton.styleFrom(backgroundColor: AppColors.forest),
+          child: const Text('Start'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true || !context.mounted) return;
+  await _runDataTask(
+    context,
+    ref,
+    title: 'Moving signatures…',
+    done: (n) => n == 0 ? 'Receipts are already up to date' : 'Moved $n signatures. Receipts load faster now.',
+    task: (progress) => ReceiptService.moveOldSignatures(onProgress: progress),
+  );
+}
+
+/// Runs a data task behind a small progress dialog, then reloads screens.
+Future<void> _runDataTask(
+  BuildContext context,
+  WidgetRef ref, {
+  required String title,
+  required String Function(int result) done,
+  required Future<int> Function(void Function(int done, int total) progress) task,
+}) async {
+  final status = ValueNotifier<String>('');
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (c) => PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(
+          children: [
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.4, color: AppColors.forest),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: status,
+                builder: (_, v, __) => Text(v.isEmpty ? title : '$title\n$v'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+  final nav = Navigator.of(context, rootNavigator: true);
+  final container = ProviderScope.containerOf(context, listen: false);
+  var popped = false;
+  void close() {
+    if (popped) return;
+    popped = true;
+    nav.pop();
+  }
+
+  try {
+    final n = await task((d, t) => status.value = t == 0 ? '' : '$d of $t');
+    close();
+    container.read(syncTickProvider.notifier).state++;
+    if (context.mounted) showAppSnack(context, done(n));
+  } catch (e) {
+    close();
+    if (context.mounted) showAppSnack(context, friendlyError(e), error: true);
+  }
+  // `status` is left to the garbage collector: the dialog may still be
+  // animating out and listening to it.
+}
+
+
+/// Switch admin tab instantly (tabs stay alive) and let it refresh quietly.
+/// A plain tab ([location] without a query) keeps the tab's own filters; a
+/// location with a query (e.g. '/admin/logs?filter=pending' from an
+/// Overview card) applies that filter.
+void showAdminTab(BuildContext context, WidgetRef ref, String location) {
+  // The tab being left stays mounted: don't leave its keyboard/focus up.
+  FocusManager.instance.primaryFocus?.unfocus();
+  final (_, n) = ref.read(adminTabShownProvider);
+  ref.read(adminTabShownProvider.notifier).state = (location, n + 1);
+  final uri = Uri.parse(location);
+  final section = AdminSection.values.where((s) => s.route == uri.path).firstOrNull;
+  final shell = StatefulNavigationShell.maybeOf(context);
+  if (shell != null && section != null && uri.queryParameters.isEmpty) {
+    shell.goBranch(section.index); // branch order = AdminSection order
+  } else {
+    context.go(location);
+  }
+}
+
+void _showTab(BuildContext context, WidgetRef ref, AdminSection target) =>
+    showAdminTab(context, ref, target.route);

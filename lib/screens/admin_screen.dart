@@ -13,6 +13,8 @@ import '../controllers/app_controller.dart';
 import '../utils/entry_stats.dart';
 import '../widgets/admin_shell.dart';
 import '../widgets/floating_confirmation_sheet.dart';
+import '../widgets/shimmer.dart';
+import '../services/data_sync.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // State
@@ -124,7 +126,6 @@ final adminOverviewProvider = FutureProvider<AdminOverview>((ref) async {
   final range = ref.watch(chartDateRangeProvider);
   final locFilter = ref.watch(overviewLocationProvider);
   final allTime = ref.watch(overviewPresetProvider) == 'all';
-  final fs = FirebaseFirestore.instance;
   final fmt = DateFormat('yyyy-MM-dd');
 
   final start = DateTime(range.start.year, range.start.month, range.start.day);
@@ -142,19 +143,25 @@ final adminOverviewProvider = FutureProvider<AdminOverview>((ref) async {
   final endKey = fmt.format(end);
   final weekAgoKey = fmt.format(weekAgo);
 
-  final results = await Future.wait([
-    fs
-        .collection('entries')
-        .where('entryDateKey', isGreaterThanOrEqualTo: fmt.format(prevStart))
-        .where('entryDateKey', isLessThanOrEqualTo: endKey)
-        .get(),
-    fs
-        .collection('receipts')
-        .where('entryDateKey', isGreaterThanOrEqualTo: fmt.format(rStart))
-        .where('entryDateKey', isLessThanOrEqualTo: fmt.format(rEnd))
-        .get(),
-    fs.collection('entries').where('approved', isEqualTo: false).get(),
+  // From the on-device cache + only what changed since the last load
+  // (services/data_sync.dart), filtered here instead of on the server.
+  ref.watch(syncTickProvider);
+  final synced = await Future.wait([
+    SyncedCollection.entries.load(),
+    SyncedCollection.receipts.load(),
   ]);
+  bool inRange(Map<String, dynamic> d, String from, String to) {
+    final k = d['entryDateKey']?.toString() ?? '';
+    return k.isNotEmpty && k.compareTo(from) >= 0 && k.compareTo(to) <= 0;
+  }
+
+  final prevStartKey = fmt.format(prevStart);
+  final rStartKey = fmt.format(rStart), rEndKey = fmt.format(rEnd);
+  final entriesInRange =
+      synced[0].where((d) => inRange(syncedData(d), prevStartKey, endKey)).toList();
+  final receiptsInRange =
+      synced[1].where((d) => inRange(syncedData(d), rStartKey, rEndKey)).toList();
+  final pendingEntries = synced[0].where((d) => syncedData(d)['approved'] == false).toList();
 
   // Entries → paid / customers / sheets
   double paid = 0, prevPaid = 0;
@@ -167,8 +174,8 @@ final adminOverviewProvider = FutureProvider<AdminOverview>((ref) async {
   final matByLoc = <String, MaterialTotals>{};
   final matTotal = MaterialTotals();
 
-  for (final doc in results[0].docs) {
-    final s = EntrySummary.fromDoc(doc);
+  for (final doc in entriesInRange) {
+    final s = EntrySummary.fromMap(doc.id, syncedData(doc));
     if (locFilter != null && s.locationId != locFilter) continue;
     final key = s.dateKey;
     if (key.compareTo(startKey) < 0) {
@@ -244,8 +251,8 @@ final adminOverviewProvider = FutureProvider<AdminOverview>((ref) async {
   int issued = 0, texted = 0, failed = 0;
   bool carrierBlocked = false;
   final failedLocs = <String>{};
-  for (final doc in results[1].docs) {
-    final d = doc.data();
+  for (final doc in receiptsInRange) {
+    final d = syncedData(doc);
     final locId = d['locationId']?.toString();
     if (locFilter != null && locId != locFilter) continue;
     final key = d['entryDateKey']?.toString() ?? '';
@@ -272,8 +279,8 @@ final adminOverviewProvider = FutureProvider<AdminOverview>((ref) async {
   // Pending approvals
   int pending = 0;
   DateTime? oldest;
-  for (final doc in results[2].docs) {
-    final s = EntrySummary.fromDoc(doc);
+  for (final doc in pendingEntries) {
+    final s = EntrySummary.fromMap(doc.id, syncedData(doc));
     if (locFilter != null && s.locationId != locFilter) continue;
     pending++;
     final dt = s.sheetDate;
@@ -335,6 +342,7 @@ class AdminScreen extends ConsumerWidget {
   }
 
   void _refresh(WidgetRef ref) {
+    SyncedCollection.touchAll();
     ref.invalidate(adminOverviewProvider);
     ref.invalidate(pendingApprovalCountProvider);
     ref.invalidate(hasDraftProvider);
@@ -342,6 +350,16 @@ class AdminScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Shown again from the tab bar: refresh quietly (the old numbers stay
+    // on screen until the new ones are ready).
+    ref.listen<(String, int)>(adminTabShownProvider, (_, next) async {
+      if (Uri.parse(next.$1).path != '/admin') return;
+      // Check for changes in the background; recompute only if any (the tab
+      // switches instantly and keeps its numbers otherwise).
+      if (await SyncedCollection.refreshChanged() && context.mounted) {
+        ref.invalidate(adminOverviewProvider);
+      }
+    });
     final preset = ref.watch(overviewPresetProvider);
     final range = ref.watch(chartDateRangeProvider);
     final locId = ref.watch(overviewLocationProvider);
@@ -458,22 +476,10 @@ class _OverviewBody extends ConsumerWidget {
     final hPad = width < 760 ? 16.0 : 28.0;
 
     return async.when(
-      loading: () => ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        children: const [
-          SizedBox(height: 160),
-          Center(
-            child: SizedBox(
-              width: 28,
-              height: 28,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.5,
-                color: AppColors.forest,
-              ),
-            ),
-          ),
-        ],
-      ),
+      // Changing the period or location keeps the current figures on screen
+      // until the new ones are ready (no shimmer flash).
+      skipLoadingOnReload: true,
+      loading: () => SkeletonDashboard(padding: EdgeInsets.all(hPad)),
       error: (e, _) => ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.all(hPad),
@@ -490,7 +496,10 @@ class _OverviewBody extends ConsumerWidget {
                   ),
                 ),
                 TextButton(
-                  onPressed: () => ref.invalidate(adminOverviewProvider),
+                  onPressed: () {
+                    SyncedCollection.touchAll();
+                    ref.invalidate(adminOverviewProvider);
+                  },
                   child: const Text('Try again'),
                 ),
               ],
@@ -936,7 +945,7 @@ class _KpiRow extends ConsumerWidget {
             : '${o.receiptsTexted} of ${o.receiptsIssued} receipts',
         accent: AppColors.amber,
         valueColor: AppColors.amberText,
-        onTap: () => context.go('/admin/receipts'),
+        onTap: () => showAdminTab(context, ref, '/admin/receipts'),
       ),
       KpiTile(
         label: 'Awaiting approval',
@@ -947,7 +956,7 @@ class _KpiRow extends ConsumerWidget {
             : 'Oldest from ${DateFormat('MMM d').format(o.oldestPending!)}',
         accent: AppColors.purple,
         valueColor: AppColors.purpleText,
-        onTap: () => context.go('/admin/logs?filter=pending'),
+        onTap: () => showAdminTab(context, ref, '/admin/logs?filter=pending'),
       ),
     ];
 
@@ -1322,7 +1331,7 @@ class _AttentionCard extends ConsumerWidget {
           title: '${o.failedTexts} text${o.failedTexts == 1 ? '' : 's'} failed',
           subtitle: '${failedNames.isEmpty ? 'Last 7 days' : failedNames} · tap to resend or print',
           pulse: true,
-          onTap: () => context.go('/admin/receipts?filter=failed'),
+          onTap: () => showAdminTab(context, ref, '/admin/receipts?filter=failed'),
         ),
       if (o.pendingCount > 0)
         _AttentionItem(
@@ -1333,7 +1342,7 @@ class _AttentionCard extends ConsumerWidget {
           subtitle: o.oldestPending == null
               ? 'Tap to review'
               : 'Oldest from ${DateFormat('MMM d').format(o.oldestPending!)}',
-          onTap: () => context.go('/admin/logs?filter=pending'),
+          onTap: () => showAdminTab(context, ref, '/admin/logs?filter=pending'),
         ),
       if (hasDraft)
         _AttentionItem(

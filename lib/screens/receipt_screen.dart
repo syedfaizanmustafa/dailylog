@@ -17,6 +17,7 @@ import '../controllers/auth_controller.dart';
 import '../models/receipt.dart';
 import '../services/receipt_service.dart';
 import '../utils/receipt_code.dart';
+import '../widgets/shimmer.dart';
 
 /// Pushes the receipt screen. Pass either a [draft] to issue a new receipt
 /// or a [receiptId] to re-open an existing one.
@@ -55,6 +56,10 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
   int _pdfVersion = 0;
   bool _issuing = true;
   String? _issueError;
+
+  /// The receipt is shown, its signature is still loading (print / share /
+  /// save wait for it so a PDF never goes out without the signature).
+  bool _sigLoading = false;
   StreamSubscription<ReceiptData?>? _sub;
 
   bool _showIssuedBanner = false;
@@ -92,12 +97,35 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
     });
     String? pendingPhone;
     var freshlyIssued = false;
+    var prefilled = false;
     try {
       ReceiptData r;
       if (widget.receiptId != null) {
         final loaded = await ReceiptService.getById(widget.receiptId!);
         if (loaded == null) throw Exception('Receipt not found');
         r = loaded;
+        if (r.signature.isEmpty) {
+          // Show the receipt right away; the signature follows.
+          final quick = await ReceiptService.renderWithoutSignature(r);
+          if (mounted) {
+            setState(() {
+              _receipt = r;
+              _pdfBytes = quick;
+              _pdfVersion++;
+              _issuing = false;
+              _sigLoading = true;
+              // Fill the fields now so nothing typed meanwhile is lost.
+              prefilled = true;
+              _idCtrl.text = r.customerId;
+              if (r.sms.to.isNotEmpty) _phoneCtrl.text = ReceiptService.formatUsPhone(r.sms.to);
+              if (r.email.to.isNotEmpty) {
+                _emailCtrl.text = r.email.to;
+                _emailOpen = true;
+              }
+            });
+          }
+          r = await ReceiptService.withSignature(r);
+        }
       } else {
         pendingPhone = ReceiptService.takePendingCustomerPhone();
         final uid = ref.read(authControllerProvider).value?.uid ?? 'unknown';
@@ -116,15 +144,18 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
         _pdfBytes = bytes;
         _pdfVersion++;
         _issuing = false;
-        _idCtrl.text = r.customerId;
-        if (r.sms.to.isNotEmpty) {
-          _phoneCtrl.text = ReceiptService.formatUsPhone(r.sms.to);
-        } else if (pendingPhone != null) {
-          _phoneCtrl.text = ReceiptService.formatUsPhone(pendingPhone);
-        }
-        if (r.email.to.isNotEmpty) {
-          _emailCtrl.text = r.email.to;
-          _emailOpen = true;
+        _sigLoading = false;
+        if (!prefilled) {
+          _idCtrl.text = r.customerId;
+          if (r.sms.to.isNotEmpty) {
+            _phoneCtrl.text = ReceiptService.formatUsPhone(r.sms.to);
+          } else if (pendingPhone != null) {
+            _phoneCtrl.text = ReceiptService.formatUsPhone(pendingPhone);
+          }
+          if (r.email.to.isNotEmpty) {
+            _emailCtrl.text = r.email.to;
+            _emailOpen = true;
+          }
         }
       });
       if (freshlyIssued) {
@@ -137,7 +168,12 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
       _sub?.cancel();
       if (r.id != null) {
         _sub = ReceiptService.watch(r.id!).listen((live) {
-          if (live != null && mounted) setState(() => _receipt = live);
+          if (live == null || !mounted) return;
+          // Live updates come without the signature (it's stored apart):
+          // keep the one already loaded.
+          final sig = _receipt?.signature ?? const [];
+          setState(() => _receipt =
+              live.signature.isEmpty && sig.isNotEmpty ? live.copyWith(signature: sig) : live);
         });
       }
     } catch (e) {
@@ -145,6 +181,11 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
       setState(() {
         _issuing = false;
         _issueError = friendlyError(e);
+        // The signature didn't load: don't leave a printable copy without it.
+        if (_sigLoading) {
+          _pdfBytes = null;
+          _sigLoading = false;
+        }
       });
     }
   }
@@ -196,7 +237,8 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
 
   Future<void> _saveCustomerId() async {
     final r = _receipt;
-    if (r == null || !r.isIssued) return;
+    // Wait for the signature: the ID is saved into the regenerated PDF.
+    if (r == null || !r.isIssued || _sigLoading) return;
     if (_idCtrl.text.trim() == r.customerId) return;
     setState(() => _savingId = true);
     try {
@@ -219,7 +261,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
   Future<void> _print() async {
     final r = _receipt;
     final bytes = _pdfBytes;
-    if (r == null || bytes == null) return;
+    if (r == null || bytes == null || _sigLoading) return;
     setState(() => _printing = true);
     try {
       final ok = await Printing.layoutPdf(
@@ -239,7 +281,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
   Future<void> _saveToFiles() async {
     final r = _receipt;
     final bytes = _pdfBytes;
-    if (r == null || bytes == null) return;
+    if (r == null || bytes == null || _sigLoading) return;
     if (kIsWeb) {
       await _share();
       return;
@@ -264,7 +306,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
   Future<void> _share() async {
     final r = _receipt;
     final bytes = _pdfBytes;
-    if (r == null || bytes == null) return;
+    if (r == null || bytes == null || _sigLoading) return;
     await Printing.sharePdf(
       bytes: bytes,
       filename: 'Receipt_${r.receiptNumberLabel}.pdf',
@@ -360,7 +402,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
                       ),
                     ],
                     const Spacer(),
-                    if (_pdfBytes != null) ...[
+                    if (_pdfBytes != null && !_sigLoading) ...[
                       IconButton(
                         tooltip: 'Save PDF to Files',
                         icon: const Icon(Icons.save_alt_rounded, color: AppColors.navy),
@@ -433,7 +475,15 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
       return Center(
         child: _issueError != null
             ? _ErrorBox(message: _issueError!, onRetry: _load)
-            : const CircularProgressIndicator(),
+            : const Shimmer(
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: AspectRatio(
+                    aspectRatio: 8.5 / 5.5,
+                    child: SkeletonBox(height: double.infinity, radius: 8),
+                  ),
+                ),
+              ),
       );
     }
     return ClipRRect(
@@ -446,7 +496,14 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
           duration: quick,
           curve: Curves.easeOutCubic,
           builder: (context, s, child) => Transform.scale(scale: s, child: child),
-          child: PdfPreview(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                // While the signature loads, its box (grey in the PDF) and
+                // the page shimmer; print / share / save wait for it.
+                child: Shimmer(
+                  enabled: _sigLoading,
+                  child: PdfPreview(
             key: ValueKey('receipt-pdf-$_pdfVersion'),
             build: (_) async => bytes,
             useActions: false,
@@ -467,6 +524,29 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
                 ),
               ],
             ),
+                  ),
+                ),
+              ),
+              if (_sigLoading)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 14,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: AppColors.navy.withOpacity(0.82),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: const Text(
+                        'Loading signature…',
+                        style: TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),
@@ -550,7 +630,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
           SizedBox(
             height: 56,
             child: FilledButton.icon(
-              onPressed: _pdfBytes == null || _printing ? null : _print,
+              onPressed: _pdfBytes == null || _sigLoading || _printing ? null : _print,
               style: FilledButton.styleFrom(
                 backgroundColor: AppColors.navy,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -568,7 +648,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
                 child: SizedBox(
                   height: 50,
                   child: OutlinedButton.icon(
-                    onPressed: _pdfBytes == null || r == null ? null : _saveToFiles,
+                    onPressed: _pdfBytes == null || _sigLoading || r == null ? null : _saveToFiles,
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppColors.navy,
                       side: const BorderSide(color: AppColors.field),
@@ -584,7 +664,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
                 child: SizedBox(
                   height: 50,
                   child: OutlinedButton.icon(
-                    onPressed: _pdfBytes == null || r == null ? null : _share,
+                    onPressed: _pdfBytes == null || _sigLoading || r == null ? null : _share,
                     style: OutlinedButton.styleFrom(
                       foregroundColor: AppColors.navy,
                       side: const BorderSide(color: AppColors.field),
@@ -798,7 +878,7 @@ class _ReceiptScreenState extends ConsumerState<ReceiptScreen> {
                   : IconButton(
                       tooltip: 'Save',
                       icon: const Icon(Icons.check),
-                      onPressed: issued ? _saveCustomerId : null,
+                      onPressed: issued && !_sigLoading ? _saveCustomerId : null,
                     ),
             ),
             onSubmitted: (_) => _saveCustomerId(),

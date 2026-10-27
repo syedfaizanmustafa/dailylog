@@ -257,6 +257,7 @@ class ReceiptData {
     bool? printed,
     DateTime? createdAt,
     String? createdBy,
+    List<ReceiptSignaturePoint>? signature,
   }) {
     return ReceiptData(
       id: id ?? this.id,
@@ -272,7 +273,7 @@ class ReceiptData {
       customerId: customerId ?? this.customerId,
       lines: lines,
       grandTotal: grandTotal,
-      signature: signature,
+      signature: signature ?? this.signature,
       entryId: entryId ?? this.entryId,
       sheetNumber: sheetNumber ?? this.sheetNumber,
       row: row,
@@ -459,8 +460,8 @@ class ReceiptData {
         'customerId': customerId,
         'lines': lines.map((l) => l.toMap()).toList(),
         'grandTotal': grandTotal,
-        // Stroke points are kept so the PDF can be regenerated if needed.
-        'signature': signature.map((p) => p.toMap()).toList(),
+        // Stroke points live in receipts/{id}/private/signature (see
+        // ReceiptService) so lists of receipts stay small.
         'entryId': entryId,
         'sheetNumber': sheetNumber,
         'row': row,
@@ -472,11 +473,17 @@ class ReceiptData {
         'createdBy': createdBy,
       };
 
-  static ReceiptData fromFirestore(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>? ?? {};
-    final sigRaw = d['signature'] as List<dynamic>? ?? const [];
+  /// [includeSignature]: false for lists, which never draw the signature
+  /// (older receipts still carry it inline until "Speed up receipts" runs).
+  static ReceiptData fromFirestore(DocumentSnapshot doc, {bool includeSignature = true}) =>
+      fromData(doc.id, doc.data() as Map<String, dynamic>? ?? {}, includeSignature: includeSignature);
+
+  /// Same as [fromFirestore] from data already read (e.g. a synced list).
+  static ReceiptData fromData(String id, Map<String, dynamic> d, {bool includeSignature = true}) {
+    final sigRaw =
+        includeSignature ? (d['signature'] as List<dynamic>? ?? const []) : const <dynamic>[];
     return ReceiptData(
-      id: doc.id,
+      id: id,
       receiptNumber: (d['receiptNumber'] as num?)?.toInt(),
       receiptCode: d['receiptCode']?.toString(),
       token: d['token']?.toString(),

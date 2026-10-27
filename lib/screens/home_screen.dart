@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/brand.dart';
 import '../controllers/app_controller.dart';
 import '../controllers/auth_controller.dart';
+import '../services/sheet_outbox.dart';
 import '../widgets/floating_confirmation_sheet.dart';
 import '../widgets/logout_confirmation_sheet.dart';
 
@@ -177,6 +178,11 @@ class HomeScreen extends ConsumerWidget {
                         final hero = Entrance(
                           delay: const Duration(milliseconds: 60),
                           child: _NewEntryHero(
+                            yard: location?.name,
+                            // Beside the draft card on wide screens it gets 2/3.
+                            width: hasDraft && c.maxWidth >= 760
+                                ? (c.maxWidth - 20) * 2 / 3
+                                : c.maxWidth,
                             onTap: () => _startNewEntry(context, ref, hasDraft),
                           ),
                         );
@@ -217,6 +223,11 @@ class HomeScreen extends ConsumerWidget {
                         );
                       },
                     ),
+                    const SizedBox(height: 18),
+                    const Entrance(
+                      delay: Duration(milliseconds: 160),
+                      child: _SyncButton(),
+                    ),
                   ],
                 ),
               ),
@@ -229,6 +240,116 @@ class HomeScreen extends ConsumerWidget {
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────
+
+/// Opens "Sheets on this tablet" (last 30 days, upload status) and uploads
+/// anything waiting. Shows a count only when something isn't uploaded.
+class _SyncButton extends ConsumerStatefulWidget {
+  const _SyncButton();
+
+  @override
+  ConsumerState<_SyncButton> createState() => _SyncButtonState();
+}
+
+class _SyncButtonState extends ConsumerState<_SyncButton> {
+  @override
+  void initState() {
+    super.initState();
+    // Home opened: quietly retry anything still waiting.
+    SheetOutbox.instance.syncAll();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final outbox = ref.watch(sheetOutboxProvider);
+    final waiting = outbox.waitingCount;
+    final syncing = outbox.syncing;
+    final warn = waiting > 0;
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () {
+          HapticFeedback.selectionClick();
+          context.push('/tablet-sheets');
+        },
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: warn ? AppColors.amberLine : AppColors.line, width: warn ? 2 : 1),
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 40,
+                height: 40,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: warn ? AppColors.amberSoft : AppColors.sageLight,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: syncing
+                          ? const Padding(
+                              padding: EdgeInsets.all(11),
+                              child: CircularProgressIndicator(strokeWidth: 2.2, color: AppColors.forest),
+                            )
+                          : Icon(
+                              warn ? Icons.cloud_upload_rounded : Icons.cloud_done_rounded,
+                              color: warn ? AppColors.amberText : AppColors.forest,
+                            ),
+                    ),
+                    if (warn)
+                      Positioned(
+                        right: -6,
+                        top: -6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: AppColors.red,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: Colors.white, width: 2),
+                          ),
+                          child: Text('$waiting',
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800)),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Sync',
+                        style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.navy)),
+                    const SizedBox(height: 2),
+                    Text(
+                      syncing
+                          ? 'Uploading…'
+                          : warn
+                              ? '$waiting not uploaded yet · tap to upload'
+                              : 'All sheets on this tablet are uploaded',
+                      style: TextStyle(fontSize: 13, color: warn ? AppColors.amberText : AppColors.slate),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: AppColors.slate),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _Header extends StatelessWidget {
   final String locationLabel;
@@ -374,9 +495,18 @@ class _PulseDotState extends State<_PulseDot>
   }
 }
 
+/// The one big action on the staff home screen: start today's log sheet.
+/// Left: date + yard, title, and a clear "Start new sheet" button. Right: a
+/// small log-sheet illustration with a plus badge that floats gently
+/// (still when "Reduce motion" is on). The whole card is the tap target.
 class _NewEntryHero extends StatefulWidget {
   final VoidCallback onTap;
-  const _NewEntryHero({required this.onTap});
+  final String? yard;
+
+  /// Width the card gets (decided by the home layout; no LayoutBuilder here
+  /// because the card can sit in an IntrinsicHeight row next to the draft).
+  final double width;
+  const _NewEntryHero({required this.onTap, required this.width, this.yard});
 
   @override
   State<_NewEntryHero> createState() => _NewEntryHeroState();
@@ -384,39 +514,48 @@ class _NewEntryHero extends StatefulWidget {
 
 class _NewEntryHeroState extends State<_NewEntryHero>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _swing = AnimationController(
+  late final AnimationController _float = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1500),
+    duration: const Duration(milliseconds: 2600),
   );
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (!MediaQuery.of(context).disableAnimations && !_swing.isAnimating) {
-      _swing.repeat(reverse: true);
+    if (MediaQuery.of(context).disableAnimations) {
+      _float.stop();
+    } else if (!_float.isAnimating) {
+      _float.repeat(reverse: true);
     }
   }
 
   @override
   void dispose() {
-    _swing.dispose();
+    _float.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final today = DateFormat('EEEE, MMMM d').format(DateTime.now());
+    final yard = widget.yard;
     return Semantics(
       button: true,
-      label: 'New entry. Open a fresh daily log sheet.',
+      label: 'New entry. Start a new daily log sheet for today.',
+      excludeSemantics: true,
       child: Container(
         constraints: const BoxConstraints(minHeight: 280),
         decoration: BoxDecoration(
-          color: AppColors.forest,
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [AppColors.forest, Color(0xFF2E4426)],
+          ),
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
             BoxShadow(
-              color: AppColors.forest.withOpacity(0.35),
-              blurRadius: 28,
+              color: AppColors.forest.withValues(alpha: 0.30),
+              blurRadius: 24,
               offset: const Offset(0, 10),
             ),
           ],
@@ -425,111 +564,302 @@ class _NewEntryHeroState extends State<_NewEntryHero>
         child: PressScale(
           borderRadius: BorderRadius.circular(24),
           onTap: widget.onTap,
-          child: Stack(
-            alignment: Alignment.centerLeft,
-            children: [
-              // Ruled log-sheet lines from the logo, fading in to the right.
-              const Positioned.fill(
-                child: RuledLines(color: Color(0x14FFFFFF), spacing: 18, thickness: 2),
-              ),
-              Positioned(
-                right: -150,
-                top: -80,
-                child: Opacity(
-                  opacity: 0.55,
-                  child: const SpinningBrandMark(
-                    size: 460,
-                    arc: AppColors.olive,
-                    head: AppColors.sage,
-                    reverse: true,
+          child: Builder(
+            builder: (context) {
+              final roomy = widget.width >= 600; // room for the illustration
+              final big = widget.width >= 460;
+              return Stack(
+                children: [
+                  // Faint brand mark, bottom-left: texture, not a focal point.
+                  Positioned(
+                    left: -60,
+                    bottom: -70,
+                    child: Opacity(
+                      opacity: 0.08,
+                      child: const BrandMark(size: 240, arc: Colors.white, head: Colors.white),
+                    ),
                   ),
-                ),
-              ),
-              Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 32),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 150,
-                        height: 160,
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            AnimatedBuilder(
-                              animation: _swing,
-                              builder: (context, child) => Transform.rotate(
-                                angle: -0.24 *
-                                    Curves.easeInOut.transform(_swing.value),
-                                child: child,
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(big ? 36 : 24, 28, 24, 28),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Today + yard, so staff know which sheet this starts.
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.today_rounded, size: 16, color: AppColors.sageLight),
+                                    const SizedBox(width: 6),
+                                    Flexible(
+                                      child: Text(
+                                        yard == null || yard.isEmpty ? today : '$today · $yard',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 13.5,
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.sageLight,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
-                              child: const BrandMark(
-                                size: 140,
-                                arc: AppColors.sageLight,
-                                head: Colors.white,
+                              const SizedBox(height: 16),
+                              Text(
+                                'New entry',
+                                style: TextStyle(
+                                  fontSize: big ? 46 : 36,
+                                  height: 1.0,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -0.5,
+                                  color: Colors.white,
+                                ),
                               ),
-                            ),
-                            Align(
-                              alignment: const Alignment(1.0, 0.95),
-                              child: Container(
-                                width: 56,
+                              const SizedBox(height: 10),
+                              const Text(
+                                'Weigh in, fill the rows, get signatures.',
+                                style: TextStyle(fontSize: 17, height: 1.35, color: Color(0xFFDCE8D2)),
+                              ),
+                              const SizedBox(height: 22),
+                              // The visible button (the whole card is tappable).
+                              Container(
                                 height: 56,
+                                padding: const EdgeInsets.fromLTRB(22, 0, 8, 0),
                                 decoration: BoxDecoration(
                                   color: Colors.white,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(color: AppColors.forest, width: 4),
+                                  borderRadius: BorderRadius.circular(28),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withValues(alpha: 0.12),
+                                      blurRadius: 10,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ],
                                 ),
-                                child: const Icon(Icons.add_rounded,
-                                    size: 38, color: AppColors.forest),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Text(
+                                      'Start new sheet',
+                                      style: TextStyle(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.w700,
+                                        color: AppColors.forest,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 14),
+                                    Container(
+                                      width: 40,
+                                      height: 40,
+                                      decoration: const BoxDecoration(
+                                        color: AppColors.forest,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 22),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 28),
-                      const Expanded(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'START HERE',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 1.5,
-                                color: AppColors.sageLight,
-                              ),
-                            ),
-                            SizedBox(height: 8),
-                            Text(
-                              'New entry',
-                              style: TextStyle(
-                                fontSize: 44,
-                                height: 1.05,
-                                fontWeight: FontWeight.w700,
-                                color: Colors.white,
-                              ),
-                            ),
-                            SizedBox(height: 10),
-                            Text(
-                              'Tap anywhere to open a fresh daily log sheet',
-                              style: TextStyle(
-                                fontSize: 18,
-                                color: Color(0xFFE3EEDA),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                        if (roomy) ...[
+                          const SizedBox(width: 20),
+                          AnimatedBuilder(
+                            animation: _float,
+                            builder: (context, child) {
+                              final t = Curves.easeInOut.transform(_float.value);
+                              return Transform.translate(offset: Offset(0, -6 * t), child: child);
+                            },
+                            child: const _SheetIllustration(),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-                ),
-            ],
+                ],
+              );
+            },
           ),
         ),
       ),
     );
   }
+}
+
+/// A small paper log sheet: header, material columns, ruled rows and a
+/// signature line, with a plus badge. Purely decorative.
+class _SheetIllustration extends StatelessWidget {
+  const _SheetIllustration();
+
+  @override
+  Widget build(BuildContext context) {
+    Widget bar(double w, Color c) => Container(
+          width: w,
+          height: 7,
+          decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(4)),
+        );
+    const rowLine = Color(0xFFE6EBE1);
+    return SizedBox(
+      width: 210,
+      height: 230,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned(
+            right: 6,
+            top: 4,
+            child: Transform.rotate(
+              angle: 0.05,
+              child: Container(
+                width: 184,
+                height: 214,
+                padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+                decoration: BoxDecoration(
+                  color: AppColors.cream,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.22),
+                      blurRadius: 18,
+                      offset: const Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        BrandMark(size: 18),
+                        SizedBox(width: 6),
+                        Text(
+                          'DAILY LOG',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.4,
+                            color: AppColors.navy,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        for (final (label, color) in const [
+                          ('AL', AppColors.blue),
+                          ('GL', AppColors.green),
+                          ('PET', AppColors.amber),
+                        ]) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: color.withValues(alpha: 0.16),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(label,
+                                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: color)),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    for (var i = 0; i < 5; i++)
+                      Container(
+                        height: 20,
+                        decoration: const BoxDecoration(
+                          border: Border(bottom: BorderSide(color: rowLine, width: 1.4)),
+                        ),
+                        alignment: Alignment.centerLeft,
+                        child: i < 3
+                            ? Row(
+                                children: [
+                                  bar(22.0 + (i * 7) % 14, const Color(0xFFCBD6C2)),
+                                  const SizedBox(width: 10),
+                                  bar(16.0 + (i * 5) % 12, const Color(0xFFCBD6C2)),
+                                  const Spacer(),
+                                  bar(26, AppColors.sage.withValues(alpha: 0.55)),
+                                ],
+                              )
+                            : null,
+                      ),
+                    const Spacer(),
+                    // Signature line
+                    SizedBox(
+                      height: 22,
+                      width: double.infinity,
+                      child: CustomPaint(painter: _SignaturePainter()),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          // The "new" badge.
+          Positioned(
+            left: 0,
+            bottom: 0,
+            child: Container(
+              width: 64,
+              height: 64,
+              decoration: BoxDecoration(
+                color: AppColors.olive,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 4),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.18),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: const Icon(Icons.add_rounded, size: 38, color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A short signature squiggle over a baseline.
+class _SignaturePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final base = Paint()
+      ..color = const Color(0xFFB9C4AF)
+      ..strokeWidth = 1.2;
+    canvas.drawLine(Offset(0, size.height - 2), Offset(size.width, size.height - 2), base);
+    final ink = Paint()
+      ..color = AppColors.navy.withValues(alpha: 0.75)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.8
+      ..strokeCap = StrokeCap.round;
+    final h = size.height;
+    final p = Path()
+      ..moveTo(size.width * 0.38, h * 0.70)
+      ..cubicTo(size.width * 0.44, h * 0.05, size.width * 0.50, h * 0.05, size.width * 0.52, h * 0.65)
+      ..cubicTo(size.width * 0.55, h * 0.95, size.width * 0.60, h * 0.20, size.width * 0.66, h * 0.55)
+      ..cubicTo(size.width * 0.72, h * 0.85, size.width * 0.80, h * 0.30, size.width * 0.96, h * 0.45);
+    canvas.drawPath(p, ink);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _DraftCard extends StatelessWidget {

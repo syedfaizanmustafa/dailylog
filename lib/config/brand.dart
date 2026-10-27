@@ -68,6 +68,16 @@ class BrandLogo {
   static String _hex(Color c) =>
       '#${(c.value & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
 
+  /// Only the solid arrows (for animating the parts separately).
+  static String arrows(Color color) =>
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 735.5 701.5">'
+      '<path fill="${_hex(color)}" fill-rule="evenodd" d="$_solid"/></svg>';
+
+  /// Only the ruled strips (for animating the parts separately).
+  static String strips(Color color) =>
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 735.5 701.5">'
+      '<path fill="${_hex(color)}" fill-rule="evenodd" d="$_ruled"/></svg>';
+
   /// Full mark. [arc] colours the ruled strips, [head] the solid arrows;
   /// both default to the logo's forest green.
   static String mark({Color arc = AppColors.forest, Color head = AppColors.forest}) {
@@ -159,6 +169,102 @@ class _RuledLinesPainter extends CustomPainter {
   @override
   bool shouldRepaint(_RuledLinesPainter old) =>
       old.color != color || old.spacing != spacing || old.thickness != thickness;
+}
+
+/// The mark drawing itself once, like the launch splash: the arrows settle
+/// in, then the ruled strips fill in top to bottom like lines being written.
+/// Plays when shown; still (fully drawn) under "Reduce motion".
+class DrawnBrandMark extends StatefulWidget {
+  final double size;
+  final Color arrows;
+  final Color strips;
+  final Duration duration;
+  final Duration delay;
+  const DrawnBrandMark({
+    super.key,
+    required this.size,
+    this.arrows = AppColors.forest,
+    this.strips = AppColors.olive,
+    this.duration = const Duration(milliseconds: 1400),
+    this.delay = Duration.zero,
+  });
+
+  @override
+  State<DrawnBrandMark> createState() => _DrawnBrandMarkState();
+}
+
+class _DrawnBrandMarkState extends State<DrawnBrandMark> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(vsync: this, duration: widget.duration);
+  bool _started = false;
+  Timer? _delay;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    if (MediaQuery.of(context).disableAnimations) {
+      _c.value = 1;
+    } else if (widget.delay == Duration.zero) {
+      _c.forward();
+    } else {
+      _delay = Timer(widget.delay, () {
+        if (mounted) _c.forward();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _delay?.cancel();
+    _c.dispose();
+    super.dispose();
+  }
+
+  double _seg(double begin, double end, [Curve curve = Curves.easeOutCubic]) =>
+      curve.transform(((_c.value - begin) / (end - begin)).clamp(0.0, 1.0));
+
+  @override
+  Widget build(BuildContext context) {
+    final w = widget.size;
+    final h = w * BrandLogo.height / BrandLogo.width;
+    final arrowsSvg = SvgPicture.string(BrandLogo.arrows(widget.arrows), width: w, height: h);
+    final stripsSvg = SvgPicture.string(BrandLogo.strips(widget.strips), width: w, height: h);
+    return SizedBox(
+      width: w,
+      height: h,
+      child: AnimatedBuilder(
+        animation: _c,
+        builder: (context, _) {
+          final a = _seg(0.0, 0.45);
+          final t = _seg(0.3, 1.0, Curves.easeInOutCubic);
+          return Stack(
+            children: [
+              Opacity(
+                opacity: a,
+                child: Transform.rotate(
+                  angle: (1 - a) * -0.24,
+                  child: Transform.scale(scale: 0.86 + 0.14 * a, child: arrowsSvg),
+                ),
+              ),
+              ClipRect(clipper: _TopRevealClip(t), child: stripsSvg),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _TopRevealClip extends CustomClipper<Rect> {
+  final double t;
+  const _TopRevealClip(this.t);
+
+  @override
+  Rect getClip(Size size) => Rect.fromLTWH(0, 0, size.width, size.height * t);
+
+  @override
+  bool shouldReclip(covariant _TopRevealClip old) => old.t != t;
 }
 
 /// Slowly rotating copy of the mark, used as background art.
